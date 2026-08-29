@@ -51,6 +51,13 @@ type AuthSessionResponse = {
   user?: AuthenticatedUser | null;
 };
 
+type SystemBootstrapResponse = {
+  embedded_chat: boolean;
+  auth_scheme: string;
+  admin_setup_required: boolean;
+  lark_sso_enabled?: boolean;
+};
+
 type BackendUserList = {
   users: AuthenticatedUser[];
 };
@@ -428,6 +435,7 @@ export default function App() {
   const [users, setUsers] = useState<AuthenticatedUser[]>([]);
   const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(() => getStoredUser());
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [larkSsoEnabled, setLarkSsoEnabled] = useState(false);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [authPending, setAuthPending] = useState(false);
   const [registerPending, setRegisterPending] = useState(false);
@@ -492,7 +500,16 @@ export default function App() {
         return;
       }
 
+      const systemBootstrapPromise = fetchJSON<SystemBootstrapResponse>('/api/system/bootstrap', {}, false)
+        .then((systemBootstrap) => {
+          setLarkSsoEnabled(systemBootstrap.lark_sso_enabled === true);
+        })
+        .catch(() => {
+          setLarkSsoEnabled(false);
+        });
+
       if (!hasStoredToken()) {
+        await systemBootstrapPromise;
         setIsAuthenticated(false);
         if (window.location.pathname !== '/register' && window.location.pathname !== '/sso/callback') {
           window.history.replaceState({}, '', '/login');
@@ -503,7 +520,10 @@ export default function App() {
       }
 
       try {
-        const session = await fetchJSON<AuthSessionResponse>('/api/auth/session');
+        const [, session] = await Promise.all([
+          systemBootstrapPromise,
+          fetchJSON<AuthSessionResponse>('/api/auth/session'),
+        ]);
         if (!session.authenticated || !session.user) {
           clearStoredAuth();
           resetAppEntries();
@@ -1080,6 +1100,7 @@ export default function App() {
         onSubmit={handleLogin}
         onAegisSsoLogin={() => window.location.assign('/api/sso/start?sso=1')}
         onLarkSsoLogin={() => window.location.assign('/api/lark/start')}
+        larkSsoEnabled={larkSsoEnabled}
         onSwitchToRegister={() => navigateAuth('/register')}
         pending={authPending}
       />

@@ -163,6 +163,14 @@ describe('Aegis App integration', () => {
 
     global.fetch = vi.fn(async (input) => {
       const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/system/bootstrap') {
+        return jsonResponse({
+          embedded_chat: false,
+          auth_scheme: 'jwt-password',
+          admin_setup_required: false,
+          lark_sso_enabled: true,
+        });
+      }
       if (url === '/api/auth/session') {
         return jsonResponse({ authenticated: false });
       }
@@ -178,6 +186,22 @@ describe('Aegis App integration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Lark SSO' }));
     expect(assignSpy).toHaveBeenLastCalledWith('/api/lark/start');
+  });
+
+  it('fails closed and hides Lark SSO when bootstrap configuration is unavailable', async () => {
+    global.fetch = vi.fn(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/auth/session') {
+        return jsonResponse({ authenticated: false });
+      }
+      throw new Error(`Unhandled request: GET ${url}`);
+    }) as typeof global.fetch;
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Lark SSO' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Aegis SSO' })).toBeInTheDocument();
   });
 
   it('supports register, login, agent/rule CRUD, and admin user management', async () => {

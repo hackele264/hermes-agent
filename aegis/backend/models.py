@@ -312,6 +312,7 @@ class SystemBootstrapResponse(BaseModel):
     embedded_chat: bool
     auth_scheme: str
     admin_setup_required: bool
+    lark_sso_enabled: bool
 
 
 class SystemRestartResponse(BaseModel):

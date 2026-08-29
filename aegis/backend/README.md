@@ -155,11 +155,14 @@ a password through the existing user-management API if local login is needed.
 
 ## Lark SSO
 
-The login page also supports Lark OAuth login. Configure the Lark application
+The login page supports Lark OAuth login when `LARK_SSO_ENABLE=true`. The
+default is `false`; when disabled, the login option is hidden and
+`/api/lark/start` rejects new login attempts. Configure the Lark application
 credentials in the process environment and register the exact callback URL in
 the Lark developer console:
 
 ```dotenv
+LARK_SSO_ENABLE=false
 LARK_APP_ID=<Lark application App ID>
 LARK_APP_SECRET=<Lark application App Secret>
 LARK_REDIRECT_URI=http://127.0.0.1:9130/api/lark/callback
