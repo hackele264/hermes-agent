@@ -26,6 +26,9 @@ class AegisSettings:
     lark_app_id: str = ""
     lark_app_secret: str = ""
     lark_redirect_uri: str = "http://127.0.0.1:9130/api/lark/callback"
+    portal_base_url: str = "http://127.0.0.1:8080"
+    aegis_org_code: str = ""
+    public_subscription_api_key: str = ""
     dist_dir: Path | None = None
 
 
@@ -55,6 +58,11 @@ def load_aegis_settings(
         os.environ.get("LARK_REDIRECT_URI")
         or "http://127.0.0.1:9130/api/lark/callback"
     ).strip()
+    portal_base_url = (
+        os.environ.get("AEGIS_PORTAL_URL")
+        or os.environ.get("PORTAL_BASE_URL")
+        or "http://127.0.0.1:8080"
+    ).strip().rstrip("/")
 
     return AegisSettings(
         host=host,
@@ -73,6 +81,9 @@ def load_aegis_settings(
         lark_app_id=(os.environ.get("LARK_APP_ID") or "").strip(),
         lark_app_secret=(os.environ.get("LARK_APP_SECRET") or "").strip(),
         lark_redirect_uri=lark_redirect_uri,
+        portal_base_url=portal_base_url,
+        aegis_org_code=(os.environ.get("AEGIS_ORG_CODE") or "").strip(),
+        public_subscription_api_key=(os.environ.get("PUBLIC_SUBSCRIPTION_API_KEY") or "").strip(),
         dist_dir=dist_dir,
     )
 

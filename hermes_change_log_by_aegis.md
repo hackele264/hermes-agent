@@ -59,6 +59,12 @@ Intent: Prefix every remote A2A turn with a compact source envelope rebuilt from
 Feature: Hermes A2A interaction client bridge.
 Intent: Read the optional `hermes.interaction.v1` Agent Card extension, parse approval/clarify metadata from both streaming and polling task updates, de-duplicate interaction events, and schedule authenticated responses with task/context/interaction IDs on the session owner loop. Preserve fail-closed behavior when the remote service does not declare or cannot serve the response channel.
 
+Feature: Interaction-aware A2A task deadline.
+Intent: Pause the caller-side polling deadline while a supported approval or clarification is pending, restore the remaining deadline after the matching resolved event, and clear stale pending markers when the remote task reaches a terminal state without adding a new interaction event protocol.
+
+Feature: Configurable A2A polling timing.
+Intent: Use a 120-second client polling deadline by default and allow process-level overrides through `A2A_POLL_TIMEOUT` and `A2A_POLL_INTERVAL`, while preserving explicit session arguments and leaving HTTP and remote approval/clarify timeouts unchanged.
+
 ## File: `toolsets.py`
 
 Feature: Toolset catalog.
