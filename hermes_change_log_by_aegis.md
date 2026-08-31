@@ -117,6 +117,9 @@ Intent: Capture follow-up messages for active delegate loops before normal messa
 Feature: Slack slash-command source identity.
 Intent: Preserve the invoking Slack display name when constructing slash-command events, including legacy `/hermes` free-form turns, so downstream source envelopes retain the same user identity fields as normal Slack messages.
 
+Feature: Slack bot-message source identity fallback.
+Intent: Preserve `bot_id` as the sender identity when a Slack `bot_message` event omits `user`, propagate the bot marker through authorization and `SessionSource`, and use event-provided bot names without passing a bot ID to the user lookup API so `<source>` attribution remains available for peer-bot mentions.
+
 Feature: Slack clarify Block Kit prompts.
 Intent: Render multi-choice gateway clarify prompts as Slack buttons, resolve authorized button clicks through the shared clarify primitive, preserve the typed-answer fallback for Other/open-ended responses, and enforce the same gateway user authorization boundary used by Slack approval and slash-confirm interactions.
 
