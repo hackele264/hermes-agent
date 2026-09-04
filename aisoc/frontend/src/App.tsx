@@ -6,7 +6,9 @@ import { RequireAuth } from "./components/RequireAuth";
 import { ChatPage } from "./pages/ChatPage";
 import { CronPage } from "./pages/CronPage";
 import { LoginPage } from "./pages/LoginPage";
+import { McpServersPage } from "./pages/McpServersPage";
 import { MemoryPage } from "./pages/MemoryPage";
+import { SkillHubPage } from "./pages/SkillHubPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { RegisterPage } from "./pages/RegisterPage";
@@ -59,6 +61,8 @@ export function App() {
             element={<Navigate to="/chat?quick=instruct_ontology" replace />}
           />
           <Route path="/ontology/*" element={<OntologyRoute />} />
+          <Route path="/integrator/mcp-servers" element={<McpServersPage />} />
+          <Route path="/integrator/skillhub" element={<SkillHubPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/users" element={<UsersPage />} />
         </Route>

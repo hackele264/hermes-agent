@@ -18,12 +18,15 @@ type NavIconName =
   | "wiki"
   | "memory"
   | "ontology"
+  | "integrator"
   | "settings"
   | "users";
 
 interface NavChild {
   path: string;
   label: string;
+  /** External destinations render as a plain <a target="_blank"> instead of a router <Link>. */
+  external?: boolean;
 }
 
 interface NavEntry {
@@ -48,6 +51,15 @@ const BASE_NAV_ITEMS: NavEntry[] = [
     children: [
       { path: "/ontology/standard-graph", label: "Standard Graph" },
       { path: "/ontology/diff-overview", label: "Diff Overview" },
+    ],
+  },
+  {
+    path: "/integrator",
+    label: "Integrator",
+    icon: "integrator",
+    children: [
+      { path: "/integrator/mcp-servers", label: "MCP Servers" },
+      { path: "/integrator/skillhub", label: "SkillHub" },
     ],
   },
   { path: "/settings", label: "Settings", icon: "settings" },
@@ -125,6 +137,13 @@ function NavIcon({ name }: { name: NavIconName }) {
           <path {...common} d="M12 3.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Z" />
           <path {...common} d="M5 15.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5ZM19 15.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Z" />
           <path {...common} d="M10.25 7.5 6.5 14M13.75 7.5 17.5 14M7 18h10" />
+        </>
+      )}
+      {name === "integrator" && (
+        <>
+          <path {...common} d="M9 4v3.5M15 4v3.5" />
+          <path {...common} d="M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0v-3Z" />
+          <path {...common} d="M12 16v2.5M8.5 20.5h7" />
         </>
       )}
       {name === "settings" && (
@@ -320,6 +339,23 @@ export function AppShell() {
                           aria-label={`${item.label} sub-views`}
                         >
                           {item.children!.map((child) => {
+                            if (child.external) {
+                              return (
+                                <a
+                                  key={child.path}
+                                  href={child.path}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="nav-child"
+                                  title={child.label}
+                                >
+                                  <span className="nav-child-dot" aria-hidden="true" />
+                                  <span className="nav-child-label">
+                                    <span className="nav-child-en">{child.label}</span>
+                                  </span>
+                                </a>
+                              );
+                            }
                             const childActive = location.pathname === child.path
                               || location.pathname.startsWith(`${child.path}/`);
                             return (
