@@ -159,6 +159,10 @@ class SkillToggleRequest(BaseModel):
     enabled: bool
 
 
+class SkillHubInstallRequest(BaseModel):
+    identifier: str
+
+
 class MemoryWriteRequest(BaseModel):
     content: str
 
@@ -189,3 +193,32 @@ class DrawerFileResponse(BaseModel):
     title: str
     type: str
     content: str
+
+
+class McpServerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    auth: str = "none"
+    bearer_token: str | None = None
+    enabled: bool = True
+
+
+class McpServerUpdate(BaseModel):
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    auth: str = "none"
+    bearer_token: str | None = None
+    enabled: bool = True
+
+
+class McpServerEnabledUpdate(BaseModel):
+    enabled: bool
+
+
+class McpServerToolsUpdate(BaseModel):
+    tools: list[str] | None = None
