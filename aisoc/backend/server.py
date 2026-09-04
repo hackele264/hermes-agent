@@ -19,10 +19,12 @@ from aisoc.backend.config import AisocSettings, is_loopback_host, load_aisoc_set
 from aisoc.backend.routes.auth import build_auth_router
 from aisoc.backend.routes.cron import build_cron_router
 from aisoc.backend.routes.logs import build_logs_router
+from aisoc.backend.routes.mcp_servers import build_mcp_servers_router
 from aisoc.backend.routes.memory import build_memory_router
 from aisoc.backend.routes.ontology import build_ontology_router
 from aisoc.backend.routes.overview import build_overview_router
 from aisoc.backend.routes.sessions import build_sessions_router
+from aisoc.backend.routes.skill_hub import build_skill_hub_router
 from aisoc.backend.routes.skills import build_skills_router
 from aisoc.backend.routes.sso import build_sso_router
 from aisoc.backend.routes.kb import build_kb_router
@@ -140,6 +142,8 @@ def create_app(settings: AisocSettings | None = None) -> FastAPI:
     app.include_router(build_sessions_router(active_settings, user_service))
     app.include_router(build_cron_router())
     app.include_router(build_skills_router())
+    app.include_router(build_mcp_servers_router())
+    app.include_router(build_skill_hub_router())
     app.include_router(build_memory_router())
     app.include_router(build_logs_router())
     app.include_router(build_overview_router())
