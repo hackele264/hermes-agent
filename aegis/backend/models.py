@@ -570,3 +570,19 @@ class DelegateAuditListResponse(BaseModel):
     total: int = Field(ge=0)
     page: int = Field(ge=1)
     page_size: int = Field(ge=1, le=100)
+
+
+class TaskAuditResponse(BaseModel):
+    id: str
+    uid: str
+    uname: str
+    session_id: str
+    prompt: str
+    create_time: str
+
+
+class TaskAuditListResponse(BaseModel):
+    logs: list[TaskAuditResponse]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)

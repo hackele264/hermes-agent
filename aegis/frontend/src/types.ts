@@ -153,6 +153,22 @@ export interface DelegateAuditPage {
   page_size: number;
 }
 
+export interface TaskAuditLog {
+  id: string;
+  uid: string;
+  uname: string;
+  session_id: string;
+  prompt: string;
+  create_time: string;
+}
+
+export interface TaskAuditPage {
+  logs: TaskAuditLog[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export interface OverviewStatusCounts {
   succ: number;
   fail: number;
