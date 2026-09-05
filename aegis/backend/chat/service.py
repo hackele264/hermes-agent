@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 import hashlib
 import inspect
 import json
+import logging
 import os
+from pathlib import Path
+import sqlite3
 import threading
 import time
 from typing import Any
@@ -23,6 +28,7 @@ from aegis.backend.chat.models import (
 )
 from aegis.backend.chat.attachments import ChatAttachment, ChatAttachmentStore, prepare_turn_message
 from aegis.backend.chat.runtime import AegisChatInputAdapter, AegisChatOutputAdapter
+from hermes_constants import get_hermes_home
 from workagent.backend.agent_runtime import default_agent_factory
 from workagent.backend.agent_runtime import load_conversation_history
 from gateway.session_context import clear_session_vars, set_session_vars
@@ -34,6 +40,187 @@ from tools.approval import (
     set_current_session_key,
     unregister_gateway_notify,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TaskAuditPage:
+    logs: list[dict[str, Any]]
+    total: int
+    page: int
+    page_size: int
+
+
+_TASK_AUDIT_COLUMNS = ("id", "uid", "uname", "session_id", "prompt", "create_time")
+_TASK_AUDIT_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS task_audit (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL,
+    uname TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    create_time TEXT NOT NULL
+)
+"""
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+class TaskAuditStore:
+    """SQLite persistence for Aegis main-agent task audit records."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path or (get_hermes_home() / "aegis.db")
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._path), timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
+    def _initialize(self) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DROP TABLE IF EXISTS task_audit__new")
+            columns = [
+                row["name"] for row in conn.execute("PRAGMA table_info(task_audit)").fetchall()
+            ]
+            if not columns:
+                conn.execute(_TASK_AUDIT_CREATE_SQL)
+            elif columns != _TASK_AUDIT_COLUMNS:
+                conn.execute(
+                    "CREATE TABLE task_audit__new ("
+                    "id TEXT PRIMARY KEY, uid TEXT NOT NULL, uname TEXT NOT NULL, "
+                    "session_id TEXT NOT NULL, prompt TEXT NOT NULL, create_time TEXT NOT NULL"
+                    ")"
+                )
+                conn.execute(
+                    "INSERT INTO task_audit__new "
+                    "(id, uid, uname, session_id, prompt, create_time) "
+                    "SELECT id, uid, uname, session_id, prompt, create_time FROM task_audit"
+                )
+                conn.execute("DROP TABLE task_audit")
+                conn.execute("ALTER TABLE task_audit__new RENAME TO task_audit")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_audit_create_time "
+                "ON task_audit(create_time DESC, id DESC)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_task_audit_uid ON task_audit(uid)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_audit_session ON task_audit(session_id)"
+            )
+            conn.commit()
+
+    def record_task_audit(
+        self,
+        *,
+        uid: Any,
+        uname: Any,
+        session_id: Any,
+        prompt: Any,
+        audit_id: str | None = None,
+        create_time: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist one accepted main-agent task prompt."""
+        record = {
+            "id": audit_id or uuid4().hex,
+            "uid": str(uid or "").strip(),
+            "uname": str(uname or "").strip(),
+            "session_id": str(session_id or "").strip(),
+            "prompt": str(prompt or ""),
+            "create_time": create_time or _utc_timestamp(),
+        }
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO task_audit "
+                "(id, uid, uname, session_id, prompt, create_time) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    record["id"],
+                    record["uid"],
+                    record["uname"],
+                    record["session_id"],
+                    record["prompt"],
+                    record["create_time"],
+                ),
+            )
+            conn.commit()
+        return record
+
+    def query_task_audits(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        create_time_from: str | None = None,
+        create_time_to: str | None = None,
+        **text_filters: Any,
+    ) -> TaskAuditPage:
+        """Query task audit records using case-insensitive substring filters."""
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise ValueError("invalid task audit page")
+
+        allowed_text_fields = {"id", "uid", "uname", "session_id", "prompt"}
+        clauses: list[str] = []
+        params: list[Any] = []
+        for field in sorted(allowed_text_fields):
+            value = str(text_filters.get(field) or "").strip()
+            if value:
+                clauses.append(f"instr(lower({field}), lower(?)) > 0")
+                params.append(value)
+        if create_time_from:
+            clauses.append("create_time >= ?")
+            params.append(create_time_from)
+        if create_time_to:
+            clauses.append("create_time <= ?")
+            params.append(create_time_to)
+
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        offset = (page - 1) * page_size
+        with self._lock, self._connect() as conn:
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM task_audit{where_sql}",
+                    params,
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                "SELECT id, uid, uname, session_id, prompt, create_time "
+                f"FROM task_audit{where_sql} "
+                "ORDER BY create_time DESC, id DESC LIMIT ? OFFSET ?",
+                [*params, page_size, offset],
+            ).fetchall()
+
+        return TaskAuditPage(
+            logs=[dict(row) for row in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+
+
+_TASK_AUDIT_STORE_CACHE: dict[Path, TaskAuditStore] = {}
+_TASK_AUDIT_STORE_CACHE_LOCK = threading.Lock()
+
+
+def get_task_audit_store(path: Path | None = None) -> TaskAuditStore:
+    """Return one initialized task audit store per resolved database path."""
+    resolved_path = (path or (get_hermes_home() / "aegis.db")).resolve()
+    store = _TASK_AUDIT_STORE_CACHE.get(resolved_path)
+    if store is not None:
+        return store
+    with _TASK_AUDIT_STORE_CACHE_LOCK:
+        store = _TASK_AUDIT_STORE_CACHE.get(resolved_path)
+        if store is None:
+            store = TaskAuditStore(resolved_path)
+            _TASK_AUDIT_STORE_CACHE[resolved_path] = store
+    return store
 
 
 def _now_timestamp() -> float:
@@ -61,6 +248,25 @@ def _runtime_session_id(session_id: str, user_id: str | None) -> str:
 def _message_delta_enabled() -> bool:
     value = str(os.getenv("MESSAGE_DELTA", "true")).strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _aegis_source_prefix(*, uid: str, uname: str) -> str:
+    source = json.dumps(
+        {
+            "platform": "aegis",
+            "uid": uid,
+            "uname": uname,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"<source>{source}</source>\n\n"
+
+
+def _prepend_aegis_source_prefix(message: object, prefix: str) -> object:
+    if isinstance(message, list):
+        return [{"type": "text", "text": prefix}, *message]
+    return f"{prefix}{message if message is not None else ''}"
 
 
 def _clarify_timeout_seconds() -> float:
@@ -257,7 +463,12 @@ class ChatSessionActor:
         self._output_adapter = AegisChatOutputAdapter(self)
         self._a2a_interaction_session = None
 
-    def update_identity(self, *, user_id: str | None, user_name: str | None) -> None:
+    def update_identity(
+        self,
+        *,
+        user_id: str | None,
+        user_name: str | None,
+    ) -> None:
         """Refresh mutable account metadata on a cached, user-scoped actor."""
         normalized_user_id = str(user_id or "").strip()
         if normalized_user_id and normalized_user_id != self._user_id:
@@ -551,6 +762,18 @@ class ChatSessionActor:
             response = f"{response}\nwarning: {result.warning_message}"
         self._emit_main_text_reply(response, turn_id)
 
+    def _record_task_audit(self, prompt: str) -> None:
+        """Record a main-agent task without allowing audit failures to break chat."""
+        try:
+            get_task_audit_store().record_task_audit(
+                uid=self._user_id,
+                uname=self._user_name,
+                session_id=self.session_id,
+                prompt=prompt,
+            )
+        except Exception:
+            logger.exception("Failed to write Aegis task audit record")
+
     def handle_message(
         self,
         text: str,
@@ -630,6 +853,7 @@ class ChatSessionActor:
             self._main_message_id = f"assistant_{uuid4().hex[:10]}"
             self._foreground_source = "main"
             self._foreground_agent = ""
+            self._record_task_audit(stripped)
             self._set_run_state("running", source="main")
             worker = threading.Thread(
                 target=self._run_turn,
@@ -1221,6 +1445,13 @@ class ChatSessionActor:
 
             history = load_conversation_history(agent, self._runtime_session_id)
             prepared_message = prepare_turn_message(user_message, attachments, agent=agent)
+            prepared_message = _prepend_aegis_source_prefix(
+                prepared_message,
+                _aegis_source_prefix(
+                    uid=self._user_id,
+                    uname=self._user_name,
+                ),
+            )
             result = agent.run_conversation(
                 user_message=prepared_message,
                 conversation_history=history,
@@ -1424,7 +1655,10 @@ class ChatSessionManager:
                 self._sessions[session_key] = actor
             else:
                 actor.set_title(title)
-                actor.update_identity(user_id=user_id, user_name=user_name)
+                actor.update_identity(
+                    user_id=user_id,
+                    user_name=user_name,
+                )
         actor.replace_connection(websocket, loop)
         return actor
 

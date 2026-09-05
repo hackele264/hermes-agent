@@ -9,7 +9,7 @@ from fastapi import APIRouter, Query, Request
 
 from aegis.backend.auth import require_admin_user, require_authenticated_user
 from aegis.backend.config import AegisSettings
-from aegis.backend.models import DelegateAuditListResponse
+from aegis.backend.models import DelegateAuditListResponse, TaskAuditListResponse
 from aegis.backend.services.delegate_security_service import DelegateSecurityService
 from aegis.backend.services.user_service import UserService
 
@@ -70,6 +70,32 @@ def build_audit_router(
             is_delegate_output=is_delegate_output,
             timestamp_from=_utc_filter(timestamp_from),
             timestamp_to=_utc_filter(timestamp_to),
+        )
+
+    @router.get("/tasks", response_model=TaskAuditListResponse)
+    async def list_task_audits(
+        request: Request,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=100),
+        id: str | None = None,
+        uid: str | None = None,
+        uname: str | None = None,
+        session_id: str | None = None,
+        prompt: str | None = None,
+        create_time_from: datetime | None = None,
+        create_time_to: datetime | None = None,
+    ) -> TaskAuditListResponse:
+        _ensure_admin(request)
+        return _service().query_task_audits(
+            page=page,
+            page_size=page_size,
+            id=id,
+            uid=uid,
+            uname=uname,
+            session_id=session_id,
+            prompt=prompt,
+            create_time_from=_utc_filter(create_time_from),
+            create_time_to=_utc_filter(create_time_to),
         )
 
     return router

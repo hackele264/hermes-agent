@@ -12,7 +12,10 @@ from aegis.backend.models import (
     DelegateAuditListResponse,
     DelegateAuditResponse,
     OverviewStatsResponse,
+    TaskAuditListResponse,
+    TaskAuditResponse,
 )
+from aegis.backend.chat.service import TaskAuditStore, get_task_audit_store
 from tools.a2a_delegate_aegis import (
     AegisDelegateStore,
     AgentPolicyConflictError,
@@ -22,8 +25,13 @@ from tools.a2a_delegate_aegis import (
 
 
 class DelegateSecurityService:
-    def __init__(self, store: AegisDelegateStore | None = None) -> None:
+    def __init__(
+        self,
+        store: AegisDelegateStore | None = None,
+        task_audit_store: TaskAuditStore | None = None,
+    ) -> None:
         self._store = store or get_aegis_delegate_store()
+        self._task_audit_store = task_audit_store or get_task_audit_store()
 
     def list_policies(self) -> list[AgentPolicyResponse]:
         return [AgentPolicyResponse.model_validate(row) for row in self._store.list_policies()]
@@ -65,6 +73,15 @@ class DelegateSecurityService:
         page = self._store.query_audits(**filters)
         return DelegateAuditListResponse(
             logs=[DelegateAuditResponse.model_validate(row) for row in page.logs],
+            total=page.total,
+            page=page.page,
+            page_size=page.page_size,
+        )
+
+    def query_task_audits(self, **filters: Any) -> TaskAuditListResponse:
+        page = self._task_audit_store.query_task_audits(**filters)
+        return TaskAuditListResponse(
+            logs=[TaskAuditResponse.model_validate(row) for row in page.logs],
             total=page.total,
             page=page.page,
             page_size=page.page_size,

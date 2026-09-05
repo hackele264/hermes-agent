@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ChevronLeft, ChevronRight, RefreshCw, RotateCcw, Search } from 'lucide-react';
 
 import { ApiError, alertApiError, fetchJSON } from '../lib/api';
 import { DelegateAuditPage } from '../types';
+import TaskAuditLogsTab from './TaskAuditLogsTab';
 
 interface AuditLogsTabProps {
   onAuthExpired?: () => void;
@@ -10,6 +11,7 @@ interface AuditLogsTabProps {
 
 type Filters = Record<string, string>;
 type BusyAction = 'refresh' | 'search' | 'reset' | 'page-prev' | 'page-next' | null;
+type AuditView = 'delegate' | 'task';
 
 const EMPTY_FILTERS: Filters = {
   id: '', platform: '', user_id: '', user_name: '', agent_name: '', goal: '',
@@ -24,6 +26,8 @@ const TEXT_FILTERS = [
 ] as const;
 
 export default function AuditLogsTab({ onAuthExpired }: AuditLogsTabProps) {
+  const [activeView, setActiveView] = useState<AuditView>('delegate');
+  const auditTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [draftFilters, setDraftFilters] = useState<Filters>(EMPTY_FILTERS);
   const [activeFilters, setActiveFilters] = useState<Filters>(EMPTY_FILTERS);
   const [data, setData] = useState<DelegateAuditPage>({ logs: [], total: 0, page: 1, page_size: 50 });
@@ -71,18 +75,68 @@ export default function AuditLogsTab({ onAuthExpired }: AuditLogsTabProps) {
 
   const lastPage = Math.max(1, Math.ceil(data.total / data.page_size));
 
+  function selectView(view: AuditView) {
+    setActiveView(view);
+  }
+
+  function handleAuditTabKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, view: AuditView) {
+    const views: AuditView[] = ['delegate', 'task'];
+    const currentIndex = views.indexOf(view);
+    let nextIndex = currentIndex;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % views.length;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + views.length) % views.length;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = views.length - 1;
+    if (nextIndex === currentIndex) return;
+    event.preventDefault();
+    const nextView = views[nextIndex];
+    selectView(nextView);
+    auditTabRefs.current[nextIndex]?.focus();
+  }
+
   return (
     <main className="aegis-admin-page" aria-labelledby="audit-logs-heading">
       <div className="aegis-admin-page__inner">
         <header className="aegis-page-intro">
           <div>
             <h1 id="audit-logs-heading" className="aegis-page-intro__title">Audit Logs</h1>
-            <p className="aegis-page-intro__description">Search A2A delegate authorization and execution outcomes.</p>
+            <p className="aegis-page-intro__description">Search A2A delegate outcomes and main-agent task execution traces.</p>
           </div>
-          <div className="aegis-page-intro__badge"><span className="aegis-page-intro__badge-label">Scope:</span> A2A delegate ledger</div>
+          <div className="aegis-page-intro__badge"><span className="aegis-page-intro__badge-label">Scope:</span> delegate + task ledgers</div>
         </header>
 
-        <section className="aegis-page-content" aria-labelledby="audit-evidence-heading">
+        <div className="aegis-page-tabs aegis-page-tabs--compact" role="tablist" aria-label="Audit log views">
+          <button
+            ref={(element) => { auditTabRefs.current[0] = element; }}
+            id="delegate-audit-tab"
+            type="button"
+            role="tab"
+            tabIndex={activeView === 'delegate' ? 0 : -1}
+            aria-selected={activeView === 'delegate'}
+            aria-controls="delegate-audit-panel"
+            onClick={() => selectView('delegate')}
+            onKeyDown={(event) => handleAuditTabKeyDown(event, 'delegate')}
+            className="aegis-page-tab"
+          >
+            Delegate audit
+          </button>
+          <button
+            ref={(element) => { auditTabRefs.current[1] = element; }}
+            id="task-audit-tab"
+            type="button"
+            role="tab"
+            tabIndex={activeView === 'task' ? 0 : -1}
+            aria-selected={activeView === 'task'}
+            aria-controls="task-audit-panel"
+            onClick={() => selectView('task')}
+            onKeyDown={(event) => handleAuditTabKeyDown(event, 'task')}
+            className="aegis-page-tab"
+          >
+            Task audit
+          </button>
+        </div>
+
+        {activeView === 'task' ? <TaskAuditLogsTab onAuthExpired={onAuthExpired} /> : <section id="delegate-audit-panel" className="aegis-page-content" role="tabpanel" aria-labelledby="delegate-audit-tab">
           <header className="aegis-page-content__header aegis-page-content__header--compact">
             <div>
               <h2 id="audit-evidence-heading" className="aegis-page-content__title">Delegate Evidence</h2>
@@ -111,6 +165,7 @@ export default function AuditLogsTab({ onAuthExpired }: AuditLogsTabProps) {
 
           <footer className="flex items-center justify-between border-t border-slate-800 px-4 py-3 text-xs text-slate-400"><span>{data.total} results · page {data.page} of {lastPage}</span><div className="flex gap-2"><button type="button" aria-label="Previous audit page" disabled={data.page <= 1 || busy} aria-busy={busyAction === 'page-prev'} onClick={() => void load(data.page - 1, activeFilters, 'page-prev')} className={`aegis-btn aegis-btn--secondary aegis-btn--icon p-2 ${busyAction === 'page-prev' ? 'aegis-btn--busy' : ''}`}><ChevronLeft className="h-4 w-4" /></button><button type="button" aria-label="Next audit page" disabled={data.page >= lastPage || busy} aria-busy={busyAction === 'page-next'} onClick={() => void load(data.page + 1, activeFilters, 'page-next')} className={`aegis-btn aegis-btn--secondary aegis-btn--icon p-2 ${busyAction === 'page-next' ? 'aegis-btn--busy' : ''}`}><ChevronRight className="h-4 w-4" /></button></div></footer>
         </section>
+        }
       </div>
     </main>
   );

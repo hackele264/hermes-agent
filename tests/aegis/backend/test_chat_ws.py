@@ -22,6 +22,14 @@ AUTH_TOKEN = jwt.encode(
 )
 
 
+def _task_message_body(user_message: str) -> str:
+    if user_message.startswith("<source>"):
+        source_end = user_message.find("</source>")
+        if source_end >= 0:
+            return user_message[source_end + len("</source>"):].lstrip("\n")
+    return user_message
+
+
 def _recv_until(ws, event_type: str, *, timeout: float = 3.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -60,7 +68,7 @@ class _StreamingAgent:
         if callable(self.stream_delta_callback):
             self.stream_delta_callback("hello ")
             self.stream_delta_callback("world")
-        return {"final_response": f"hello world: {user_message}", "completed": True}
+        return {"final_response": f"hello world: {_task_message_body(user_message)}", "completed": True}
 
 
 class _FileMutationAgent(_StreamingAgent):
@@ -99,7 +107,7 @@ class _FileMutationAgent(_StreamingAgent):
                 {"path": "README.md"},
                 json.dumps({"error": "write denied"}),
             )
-        return {"final_response": f"edits complete: {user_message}", "completed": True}
+        return {"final_response": f"edits complete: {_task_message_body(user_message)}", "completed": True}
 
 
 class _MainA2AResumeAgent:
@@ -127,7 +135,7 @@ class _MainA2AResumeAgent:
             self.tool_complete_callback("call-a2a", "a2a_delegate", {"agent_name": "threat-intel"}, "delegated")
         if callable(self.stream_delta_callback):
             self.stream_delta_callback("after delegate")
-        return {"final_response": f"final: {user_message}", "completed": True}
+        return {"final_response": f"final: {_task_message_body(user_message)}", "completed": True}
 
 
 class _SwitchableAgent(_StreamingAgent):
@@ -180,7 +188,7 @@ class _SlowSwitchableAgent(_SwitchableAgent):
         time.sleep(0.2)
         if callable(self.stream_delta_callback):
             self.stream_delta_callback("world")
-        return {"final_response": f"hello world: {user_message}", "completed": True}
+        return {"final_response": f"hello world: {_task_message_body(user_message)}", "completed": True}
 
 
 class _HeaderAwareSwitchableAgent(_StreamingAgent):
@@ -625,6 +633,85 @@ def test_chat_ws_bind_passes_authenticated_user_identity_to_agent_factory(
     assert captured["user_name"] == "admin"
 
 
+def test_chat_ws_adds_authenticated_source_prefix_and_records_task_audit(
+    load_backend,
+    monkeypatch,
+    hermes_home,
+) -> None:
+    monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
+    server = load_backend("aegis.backend.server")
+    app = server.create_app()
+    received_messages: list[str] = []
+
+    class _CapturingAgent(_StreamingAgent):
+        def run_conversation(self, user_message: str, **kwargs) -> dict[str, Any]:
+            received_messages.append(user_message)
+            return super().run_conversation(user_message, **kwargs)
+
+    app.state.chat_manager.set_agent_factory(lambda session_id: _CapturingAgent(session_id))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/api/chat/ws?token={AUTH_TOKEN}") as ws:
+            ws.send_json({"type": "session.bind", "title": "Task Audit"})
+            session_id = _recv_until(ws, "session.bound")["session_id"]
+            ws.send_json(
+                {
+                    "type": "message.send",
+                    "session_id": session_id,
+                    "text": "Investigate example.com",
+                    "client_msg_id": "task-audit-1",
+                }
+            )
+            _recv_until(ws, "message.accepted")
+            _recv_until(ws, "message.completed")
+
+    expected_prefix = (
+        '<source>{"platform":"aegis","uid":"0000000000000001",'
+        '"uname":"admin"}</source>\n\n'
+    )
+    assert received_messages == [f"{expected_prefix}Investigate example.com"]
+
+    from aegis.backend.chat.service import TaskAuditStore
+
+    page = TaskAuditStore(hermes_home / "aegis.db").query_task_audits()
+    assert page.total == 1
+    assert page.logs[0]["uid"] == "0000000000000001"
+    assert page.logs[0]["uname"] == "admin"
+    assert page.logs[0]["session_id"] == session_id
+    assert page.logs[0]["prompt"] == "Investigate example.com"
+    assert list(page.logs[0]) == ["id", "uid", "uname", "session_id", "prompt", "create_time"]
+
+
+def test_chat_ws_does_not_record_native_control_commands_as_tasks(
+    load_backend,
+    monkeypatch,
+    hermes_home,
+) -> None:
+    monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
+    server = load_backend("aegis.backend.server")
+    app = server.create_app()
+    app.state.chat_manager.set_agent_factory(lambda session_id: _StreamingAgent(session_id))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/api/chat/ws?token={AUTH_TOKEN}") as ws:
+            ws.send_json({"type": "session.bind", "title": "Control Audit"})
+            session_id = _recv_until(ws, "session.bound")["session_id"]
+            ws.send_json(
+                {
+                    "type": "message.send",
+                    "session_id": session_id,
+                    "text": "/help",
+                    "client_msg_id": "control-audit-1",
+                }
+            )
+            _recv_until(ws, "message.accepted")
+            _recv_until(ws, "message.completed")
+
+    from aegis.backend.chat.service import TaskAuditStore
+
+    assert TaskAuditStore(hermes_home / "aegis.db").query_task_audits().total == 0
+
+
 def test_chat_manager_scopes_same_public_session_by_user(load_backend) -> None:
     service = load_backend("aegis.backend.chat.service")
     created: list[tuple[str, str]] = []
@@ -929,7 +1016,7 @@ def test_chat_ws_resolves_cached_quick_command_tokens_before_running_the_agent(
 
     class _CapturingAgent(_StreamingAgent):
         def run_conversation(self, user_message: str, **kwargs) -> dict[str, Any]:
-            received_messages.append(user_message)
+            received_messages.append(_task_message_body(user_message))
             return super().run_conversation(user_message, **kwargs)
 
     app.state.chat_manager.set_agent_factory(lambda session_id: _CapturingAgent(session_id))
@@ -981,6 +1068,13 @@ def test_chat_ws_resolves_cached_quick_command_tokens_before_running_the_agent(
     assert received_messages == [expected]
     assert completed["content"] == f"hello world: {expected}"
 
+    from aegis.backend.chat.service import TaskAuditStore
+
+    task_page = TaskAuditStore(hermes_home / "aegis.db").query_task_audits()
+    assert task_page.total == 1
+    assert task_page.logs[0]["prompt"] == expected
+    assert "<source>" not in task_page.logs[0]["prompt"]
+
 
 def test_chat_ws_keeps_unprovided_agent_template_variables_after_name_resolution(
     load_backend,
@@ -995,7 +1089,7 @@ def test_chat_ws_keeps_unprovided_agent_template_variables_after_name_resolution
 
     class _CapturingAgent(_StreamingAgent):
         def run_conversation(self, user_message: str, **kwargs) -> dict[str, Any]:
-            received_messages.append(user_message)
+            received_messages.append(_task_message_body(user_message))
             return super().run_conversation(user_message, **kwargs)
 
     app.state.chat_manager.set_agent_factory(lambda session_id: _CapturingAgent(session_id))
@@ -1043,7 +1137,7 @@ def test_chat_ws_expands_args_after_resolving_quick_commands(
 
     class _CapturingAgent(_StreamingAgent):
         def run_conversation(self, user_message: str, **kwargs) -> dict[str, Any]:
-            received_messages.append(user_message)
+            received_messages.append(_task_message_body(user_message))
             return super().run_conversation(user_message, **kwargs)
 
     app.state.chat_manager.set_agent_factory(lambda session_id: _CapturingAgent(session_id))
@@ -1108,7 +1202,7 @@ def test_chat_ws_passes_a2ui_theme_and_date_args_to_instruct_templates(
 
     class _CapturingAgent(_StreamingAgent):
         def run_conversation(self, user_message: str, **kwargs) -> dict[str, Any]:
-            received_messages.append(user_message)
+            received_messages.append(_task_message_body(user_message))
             return super().run_conversation(user_message, **kwargs)
 
     app.state.chat_manager.set_agent_factory(lambda session_id: _CapturingAgent(session_id))
@@ -1735,6 +1829,12 @@ def test_chat_ws_routes_follow_up_into_delegate_foreground_with_srcagent(
             assert exited["srcagent"] == "threat-intel"
             assert exited["reason"] == "return_to_main"
             assert exited["turn_id"] == second_accepted["turn_id"]
+
+    from aegis.backend.chat.service import TaskAuditStore
+
+    task_page = TaskAuditStore(hermes_home / "aegis.db").query_task_audits()
+    assert task_page.total == 1
+    assert task_page.logs[0]["prompt"] == "delegate please"
 
 
 def test_chat_ws_renders_delegate_final_when_no_streamed_delta(

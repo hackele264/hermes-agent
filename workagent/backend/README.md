@@ -47,6 +47,24 @@ A2A 模块默认允许直接连接；设置 `WORKAGENT_A2A_AUTH=true` 后，会�
 
 A2A 审批/澄清交互扩展（`hermes.interaction.v1`）的服务端协议、任务元数据、响应 endpoint 和清理语义见 [`backend/docs/a2a-interaction-extension.md`](docs/a2a-interaction-extension.md)。该扩展使用同一 A2A Bearer 认证；未声明扩展的调用方保持原有行为。
 
+#### A2A 模式的 Toolset 配置
+
+A2A 服务端创建的 Hermes agent 使用固定的平台键 `workagent-a2a`。因此，A2A agent 的 toolset 必须写在当前 profile 的 `platform_toolsets.workagent-a2a` 下：
+
+```yaml
+# ~/.hermes/config.yaml（或当前 profile 的 config.yaml）
+platform_toolsets:
+  workagent-a2a:
+    - hermes-cli
+    - userenv
+```
+
+`userenv` 是独立的 opt-in toolset，不属于 `hermes-cli`。只在 `platform_toolsets.cli`、`slack`、`aegis` 或其他调用方平台下启用 `userenv`，不会自动传递给 WorkAgent A2A agent。这里的 `a2a` toolset 是调用方使用 `a2a_list` / `a2a_delegate` 的能力，不是 A2A 服务端的配置键。
+
+如果当前 profile 已经存在 `platform_toolsets.workagent-a2a`，请在原有列表中追加 `userenv`，保留其他已启用的 toolset。修改配置后需要重启 A2A 服务；已存在 context 复用的 agent 不会动态刷新工具列表。
+
+另外，toolset 出现在工具 schema 中不代表每次调用都能成功。`userenv` 还要求 A2A 请求携带已认证的运行时用户身份（`source` 中包含 `platform` 和 `uid`）；没有用户身份时，调用仍会被拒绝。
+
 #### A2A 模式启用 YOLO
 
 如果要使用当前 `aisoc` profile 启动 A2A service，并让 A2A agent 自动跳过危险命令的人工审批，使用：
