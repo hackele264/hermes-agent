@@ -17,22 +17,15 @@ def _strip_sensitive_session_fields(item: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-def _is_web_session(session: dict[str, Any]) -> bool:
-    """Return True for AISOC web-UI sessions, which are the only channel
-    scoped per authenticated account. All other channels (slack/feishu/
-    telegram/cli/cron/tui/api...) are shared and visible to every caller."""
-    return str(session.get("source") or "") == "aisoc_web"
-
-
 def _owns_session(session: dict[str, Any], *, user_id: str) -> bool:
     """Return True when ``user_id`` may modify (not just view) ``session``.
 
-    Mutation stays strict and owner-scoped: the caller must match the
-    session's stored ``user_id`` exactly. Ownerless sessions (legacy rows,
-    or rows from platforms with no per-user account concept) are never
-    mutable through this check, since nobody has claimed them yet. Read
-    access is governed separately by ``_is_readable`` (non-``aisoc_web``
-    channels are shared reads by design).
+    Every user, including admins, must match the session's stored ``user_id``
+    exactly — used only for mutations (``delete_session``). Sessions with no
+    owner (created before user accounts existed, or from platforms with no
+    per-user account concept — tui/discord/cron/etc.) are never mutable
+    through this check, since nobody has claimed them yet. For read access
+    see ``_is_readable``, which treats ownerless sessions as public.
     """
     owner = str(session.get("user_id") or "").strip()
     return bool(owner) and owner == user_id
@@ -41,14 +34,13 @@ def _owns_session(session: dict[str, Any], *, user_id: str) -> bool:
 def _is_readable(session: dict[str, Any], *, user_id: str) -> bool:
     """Return True when ``user_id`` may view (not modify) ``session``.
 
-    Only ``aisoc_web`` sessions are private: owner must match exactly (or,
-    for unclaimed legacy web rows, public reads are allowed). All other
-    channels (slack/feishu/telegram/cli/cron/tui/discord/api/...) are shared
-    by design — the browse/search page's whole purpose is to surface history
-    across platforms, and most of it never carries a per-user owner.
+    Ownerless sessions (legacy rows predating per-user accounts, or rows
+    from platforms with no per-user account concept — tui/discord/cron/etc.)
+    are public reads by design: the browse/search page's whole purpose is to
+    surface history across platforms, and most of it was never going to
+    carry a user_id in the first place. Owned sessions still require an
+    exact match.
     """
-    if not _is_web_session(session):
-        return True
     owner = str(session.get("user_id") or "").strip()
     return not owner or owner == user_id
 
@@ -56,15 +48,11 @@ def _is_readable(session: dict[str, Any], *, user_id: str) -> bool:
 def _build_message_search_query(query: str) -> str:
     """Translate a user query into an FTS5 query for ``search_messages``.
 
-    ASCII tokens become ``<token> OR <token>*``: a prefix-only query
-    (``<token>*``) floods the result window with long-word prefix hits and
-    buries the exact token past the result limit — e.g. searching ``hi``
-    matched 13k rows and pushed the exact ``hi`` message out of view. The
-    OR keeps the exact token (ranked first) plus prefix coverage. CJK
-    tokens are passed through verbatim: ``search_messages`` routes them to
-    its trigram/LIKE paths where ``*`` is a literal character, so appending
-    it would prevent any match. Already-quoted phrases and explicit ``*``
-    prefixes are left untouched.
+    ASCII tokens get a trailing ``*`` so partial words match as prefixes.
+    CJK tokens are passed through verbatim: ``search_messages`` routes them to
+    its trigram/LIKE paths where ``*`` is a literal character, so appending it
+    would prevent any match. Already-quoted phrases and explicit ``*`` prefixes
+    are left untouched.
     """
     terms: list[str] = []
     for token in re.findall(r'"[^"]*"|\S+', query.strip()):
@@ -73,7 +61,7 @@ def _build_message_search_query(query: str) -> str:
         elif SessionDB._contains_cjk(token):
             terms.append(token)
         else:
-            terms.append(f"{token} OR {token}*")
+            terms.append(token + "*")
     return " ".join(terms)
 
 
@@ -96,71 +84,16 @@ def list_sessions(
     db = SessionDB()
     try:
         include_ownerless = not strict_owner
-        src = str(source or "").strip() or None
-        # Only the AISOC web-UI channel is scoped per authenticated account.
-        # All other channels (or the unfiltered "all channels" view, which the
-        # web UI drives with source=None) are shared: do NOT constrain the SQL
-        # by user_id for them, otherwise owned non-web sessions (e.g. feishu
-        # user_id=2e97629d) would be hidden from everyone else.
-        if src == "aisoc_web":
-            sessions = db.list_sessions_rich(
-                source=src,
-                limit=limit,
-                offset=offset,
-                user_id=user_id,
-                include_ownerless=include_ownerless,
-                include_continuation_children=True,
-                project_compression_tips=False,
-            )
-            total = db.session_count(
-                source=src, user_id=user_id, include_ownerless=include_ownerless
-            )
-        elif src is None:
-            # "All channels" view: shared channels are visible to everyone, but
-            # aisoc_web sessions must stay user-scoped. Merge the two
-            # populations (rather than dropping the SQL filter entirely) so
-            # other users' web sessions never leak into the unfiltered list.
-            shared = db.list_sessions_rich(
-                exclude_sources=["aisoc_web"],
-                limit=limit + offset,
-                offset=0,
-                user_id=None,
-                include_ownerless=True,
-                include_continuation_children=True,
-                project_compression_tips=False,
-            )
-            web_own = db.list_sessions_rich(
-                source="aisoc_web",
-                limit=limit + offset,
-                offset=0,
-                user_id=user_id,
-                include_ownerless=include_ownerless,
-                include_continuation_children=True,
-                project_compression_tips=False,
-            )
-            merged = sorted(
-                web_own + shared,
-                key=lambda s: s.get("last_active") or s.get("started_at") or 0,
-                reverse=True,
-            )
-            sessions = merged[offset : offset + limit]
-            total = db.session_count(
-                exclude_sources=["aisoc_web"], user_id=None, include_ownerless=True
-            ) + db.session_count(
-                source="aisoc_web", user_id=user_id, include_ownerless=include_ownerless
-            )
-        else:
-            # Any other single channel (slack/feishu/telegram/...): shared.
-            sessions = db.list_sessions_rich(
-                source=src,
-                limit=limit,
-                offset=offset,
-                user_id=None,
-                include_ownerless=True,
-                include_continuation_children=True,
-                project_compression_tips=False,
-            )
-            total = db.session_count(source=src, user_id=None, include_ownerless=True)
+        sessions = db.list_sessions_rich(
+            source=source,
+            limit=limit,
+            offset=offset,
+            user_id=user_id,
+            include_ownerless=include_ownerless,
+        )
+        total = db.session_count(
+            source=source, user_id=user_id, include_ownerless=include_ownerless
+        )
         now = time.time()
         for item in sessions:
             item["is_active"] = (
