@@ -97,10 +97,32 @@ _COMPRESSION_CHILD_SQL = (
     "        AND p.end_reason = 'compression')"
 )
 
+# Continuation child: compression OR session_reset (/new). Mirrors the chain
+# definition used by list_sessions_rich projection (end_reason IN
+# ('compression','session_reset')); _COMPRESSION_CHILD_SQL alone only covers
+# compression and would keep /new continuations hidden.
+_CONTINUATION_CHILD_SQL = (
+    "EXISTS (SELECT 1 FROM sessions p"
+    "        WHERE p.id = {a}.parent_session_id"
+    "        AND p.end_reason IN ('compression', 'session_reset'))"
+)
+
 
 # Rows that surface in pickers: roots + branch children (subagent runs and
 # compression continuations stay hidden).
 _LISTABLE_CHILD_SQL = f"(s.parent_session_id IS NULL OR {_BRANCH_CHILD_SQL.format(a='s')})"
+
+# Variant that ALSO surfaces compression/session_reset continuation children
+# (roots-of-chains stay visible alongside their continuations, instead of
+# being projected/hidden by list_sessions_rich). Subagent runs (delegate
+# markers) remain excluded. Used by callers that must show every /new session
+# as its own row (e.g. AISOC 9120 "every reset is a separate conversation").
+_LISTABLE_CHILD_WITH_CONTINUATIONS_SQL = (
+    f"(s.parent_session_id IS NULL"
+    f" OR {_BRANCH_CHILD_SQL.format(a='s')}"
+    f" OR {_CONTINUATION_CHILD_SQL.format(a='s')})"
+    f" AND json_extract(COALESCE(s.model_config, '{{}}'), '$._delegate_from') IS NULL"
+)
 
 
 def _ephemeral_child_sql(alias: str = "s") -> str:

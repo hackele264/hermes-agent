@@ -1478,6 +1478,31 @@ class TestSessionTitleLineage:
         # The unrelated holder keeps its title.
         assert db.get_session("a")["title"] == "shared"
 
+    def _make_reset_chain(self, db, t0, *, root="root", tip="tip"):
+        db.create_session(root, "cli")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, root))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='session_reset' WHERE id=?",
+            (t0 + 100, root),
+        )
+        db.create_session(tip, "cli", parent_session_id=root)
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 200, tip))
+        db._conn.commit()
+
+    def test_rename_new_reset_tip_back_to_base_transfers_title(self, db):
+        """Same dead-end as the compression case, but for a /new'd session:
+        the old (session_reset) predecessor is hidden from the list exactly
+        like a compression root, so renaming the tip back to a title held by
+        that hidden predecessor must transfer, not raise."""
+        import time as _time
+        self._make_reset_chain(db, _time.time() - 3600)
+        db.set_session_title("root", "fingerprint-scanner")
+        db.set_session_title("tip", "fingerprint-scanner #2")
+
+        assert db.set_session_title("tip", "fingerprint-scanner") is True
+        assert db.get_session("tip")["title"] == "fingerprint-scanner"
+        assert db.get_session("root")["title"] is None
+
 
 
 class TestSanitizeTitle:
@@ -1985,7 +2010,164 @@ class TestCompressionChainProjection:
         assert db.get_compression_tip("mid1") == "tip1"
         assert db.get_compression_tip("tip1") == "tip1"
 
+    def _build_reset_chain(self, db, t0: float):
+        """Helper: builds a /new (session_reset) boundary root -> tip."""
+        db.create_session("oldsess", "cli")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "oldsess"))
+        db.append_message("oldsess", "user", "the old conversation")
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=?",
+            (t0 + 60, "session_reset", "oldsess"),
+        )
+        db.create_session("newsess", "cli", parent_session_id="oldsess")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=? WHERE id=?", (t0 + 61, "newsess")
+        )
+        db.append_message("newsess", "user", "brand new conversation after /new")
+        db._conn.commit()
+        return ("oldsess", "newsess")
 
+    def test_get_compression_tip_does_not_cross_session_reset(self, db):
+        """Routing/resume/cron resolve 'the session' via get_compression_tip
+        and must stop exactly at a /new boundary — /new only works as a
+        reset because this does NOT walk forward into the new session."""
+        import time as _time
+        self._build_reset_chain(db, _time.time() - 3600)
+        assert db.get_compression_tip("oldsess") == "oldsess"
+
+    def test_list_surfaces_tip_for_new_reset_root(self, db):
+        """A /new'd session must appear on the list as the live tip of its
+        old slot, not vanish (hermes-agent#93552): parent_session_id hides
+        it from _LISTABLE_CHILD_SQL as a "child", and prior to this fix
+        nothing projected it back in since only end_reason='compression'
+        roots were projected."""
+        import time as _time
+        self._build_reset_chain(db, _time.time() - 3600)
+
+        sessions = db.list_sessions_rich(source="cli", limit=20)
+        ids = [s["id"] for s in sessions]
+        assert "newsess" in ids
+        assert "oldsess" not in ids
+
+        tip_row = next(s for s in sessions if s["id"] == "newsess")
+        assert tip_row["_lineage_root_id"] == "oldsess"
+        assert tip_row["preview"].startswith("brand new conversation after /new")
+        assert tip_row["ended_at"] is None  # tip is still live
+
+    def test_order_by_last_active_surfaces_new_reset_chain_by_tip_recency(self, db):
+        """The order_by_last_active CTE path must also cross a /new boundary:
+        effective_last_active has to come from the live tip's activity, not
+        the old reset root's — otherwise a /new'd session could sort behind
+        (or page off entirely behind) sessions less recently active than its
+        own tip actually is.
+        """
+        import time as _time
+        t_old = _time.time() - 30 * 86400  # root started a month ago
+        self._build_reset_chain(db, t_old)
+        # newsess's message above (in _build_reset_chain) lands at "now".
+
+        # Unrelated session, active more recently than the reset root's
+        # original started_at but well before newsess's just-now activity.
+        db.create_session("other", "cli")
+        other_activity = t_old + 10 * 86400
+        db._conn.execute(
+            "UPDATE sessions SET started_at=? WHERE id=?", (other_activity, "other")
+        )
+        db.append_message("other", "user", "unrelated older activity")
+        db._conn.execute(
+            "UPDATE messages SET timestamp=? WHERE session_id=?",
+            (other_activity, "other"),
+        )
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="cli", limit=20, order_by_last_active=True
+        )
+        ids = [s["id"] for s in sessions]
+        assert "oldsess" not in ids
+        assert "newsess" in ids and "other" in ids
+        assert ids.index("newsess") < ids.index("other"), (
+            "the reset chain's live tip is the most recently active session "
+            "and must sort first"
+        )
+
+    def test_set_session_archived_cascades_across_new_reset_lineage(self, db):
+        """Archiving either end of a /new lineage must flip the whole chain:
+        list_sessions_rich reads `archived` off the root row for the whole
+        projected line, so archiving only the tip would silently orphan the
+        (still visible, stale-content) root, and archiving only the root
+        would silently un-list the live tip.
+        """
+        import time as _time
+        oldsess, newsess = self._build_reset_chain(db, _time.time() - 3600)
+
+        assert db.set_session_archived(newsess, True) is True
+        assert db.get_session(oldsess)["archived"] == 1
+        assert db.get_session(newsess)["archived"] == 1
+
+        assert db.set_session_archived(oldsess, False) is True
+        assert db.get_session(oldsess)["archived"] == 0
+        assert db.get_session(newsess)["archived"] == 0
+
+    def test_set_session_pinned_cascades_across_new_reset_lineage(self, db):
+        """A pin recorded only on the tip has no visible effect: the
+        include_pinned back-fill in list_sessions_rich reads `pinned` off
+        the root row, not the projected tip."""
+        import time as _time
+        oldsess, newsess = self._build_reset_chain(db, _time.time() - 3600)
+
+        assert db.set_session_pinned(newsess, True) is True
+        assert db.get_session(oldsess)["pinned"] == 1
+        assert db.get_session(newsess)["pinned"] == 1
+
+    def test_set_session_read_cascades_across_new_reset_lineage(self, db):
+        """`unread` is derived by comparing the root's last_read_at against
+        the tip's activity — the two watermarks must stay in sync across a
+        /new boundary the same way they do across a compression split."""
+        import time as _time
+        oldsess, newsess = self._build_reset_chain(db, _time.time() - 3600)
+
+        assert db.set_session_read(newsess, True) is True
+        assert db.get_session(oldsess)["last_read_at"] is not None
+        assert db.get_session(newsess)["last_read_at"] is not None
+
+    def test_archive_stale_sessions_does_not_orphan_live_new_reset_tip(self, db):
+        """A /new-reset root is always "idle" by the time a stale sweep runs
+        (it never gets another message after the reset). Without excluding
+        session_reset roots from independent candidacy, the sweep would
+        archive the root on its own and silently un-list the still-live tip
+        (list_sessions_rich reads `archived` off the root row).
+        """
+        import time as _time
+        t_old = _time.time() - 20 * 86400  # reset happened 20 days ago
+        oldsess, newsess = self._build_reset_chain(db, t_old)
+        # newsess's message (from _build_reset_chain) lands at "now" — live.
+
+        assert db.archive_stale_sessions(3) == 0
+        assert db.get_session(oldsess)["archived"] == 0
+        assert db.get_session(newsess)["archived"] == 0
+        ids = [s["id"] for s in db.list_sessions_rich(source="cli", limit=20)]
+        assert "newsess" in ids
+
+    def test_archive_stale_sessions_sweeps_whole_lineage_once_tip_idles(self, db):
+        """Once the tip itself goes idle, the sweep must pick it up (it is
+        not excluded — only compression/reset *roots* are) and cascade the
+        archive across the whole lineage, matching compression's behavior.
+        """
+        import time as _time
+        t_old = _time.time() - 20 * 86400
+        oldsess, newsess = self._build_reset_chain(db, t_old)
+        # Age the tip's own activity past the cutoff too.
+        tip_activity = t_old + 250
+        db._conn.execute(
+            "UPDATE messages SET timestamp=? WHERE session_id=?",
+            (tip_activity, newsess),
+        )
+        db._conn.commit()
+
+        assert db.archive_stale_sessions(3) == 1
+        assert db.get_session(oldsess)["archived"] == 1
+        assert db.get_session(newsess)["archived"] == 1
 
     def test_list_surfaces_tip_for_compressed_root(self, db):
         """The list must show the tip's id/message_count/preview in place of
