@@ -9,6 +9,7 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, TypeAdapter, fiel
 
 
 UserStatus = Literal["enabled", "disabled"]
+UserRoleName = Literal["user", "operator", "admin"]
 
 
 class UserResponse(BaseModel):
@@ -105,6 +106,43 @@ class UserPasswordUpdateResponse(BaseModel):
 class UserDeleteResponse(BaseModel):
     deleted: bool
     uid: str
+
+
+class UserRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: str = Field(min_length=1, max_length=128)
+    uid: str = Field(min_length=1, max_length=256)
+    uname: str = Field(min_length=1, max_length=256)
+    role: UserRoleName
+
+    @field_validator("platform", "uid", "uname", mode="before")
+    @classmethod
+    def require_nonblank_value(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("Value must not be blank.")
+        return normalized
+
+
+class UserRoleResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    platform: str
+    uid: str
+    uname: str
+    role: UserRoleName
+    update_time: str
+
+
+class UserRoleListResponse(BaseModel):
+    roles: list[UserRoleResponse] = Field(default_factory=list)
+
+
+class UserRoleDeleteResponse(BaseModel):
+    deleted: bool
+    id: str
 
 
 class PromptTemplateRequest(BaseModel):

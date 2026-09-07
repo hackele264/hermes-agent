@@ -33,6 +33,7 @@ from aegis.backend.routes.system_instructs import build_system_instructs_router
 from aegis.backend.routes.skills_static import build_skills_static_router
 from aegis.backend.routes.user_manuals import build_user_manuals_router
 from aegis.backend.routes.users import build_users_router
+from aegis.backend.routes.user_roles import build_user_roles_router
 from aegis.backend.services.user_service import UserService
 from aegis.backend.services.a2a_context_service import A2AContextService
 from aegis.backend.services.agent_service import AgentService
@@ -41,6 +42,8 @@ from aegis.backend.services.prompt_template_store import PromptTemplateStore
 from aegis.backend.services.user_manual_service import UserManualService
 from aegis.backend.services.system_instruct_service import SystemInstructService
 from aegis.backend.services.system_instruct_store import SystemInstructStore
+from aegis.backend.services.user_role_service import UserRoleService
+from aegis.backend.services.user_role_store import UserRoleStore
 
 
 PUBLIC_API_PATHS = frozenset(
@@ -125,6 +128,7 @@ def create_app(settings: AegisSettings | None = None) -> FastAPI:
     user_service = UserService()
     prompt_template_service = PromptTemplateService(PromptTemplateStore())
     system_instruct_service = SystemInstructService(SystemInstructStore())
+    user_role_service = UserRoleService(UserRoleStore())
     agent_service = AgentService()
     user_manual_service = UserManualService()
     a2a_context_service = A2AContextService()
@@ -172,6 +176,7 @@ def create_app(settings: AegisSettings | None = None) -> FastAPI:
     app.include_router(build_lark_sso_router(active_settings, user_service, user_service.store))
     app.include_router(build_overview_router(active_settings, user_service))
     app.include_router(build_users_router(active_settings, user_service))
+    app.include_router(build_user_roles_router(active_settings, user_service, user_role_service))
     app.include_router(
         build_prompt_templates_router(
             active_settings,

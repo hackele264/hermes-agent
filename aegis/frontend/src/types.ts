@@ -1,6 +1,7 @@
 export type AgentStatus = 'Active' | 'Idle' | 'Offline';
 export type RoutingRuleStatus = 'Enabled' | 'Disabled';
 export type UserStatus = 'enabled' | 'disabled';
+export type UserRoleName = 'user' | 'operator' | 'admin';
 export type AgentPolicyStatus = 'allow' | 'deny';
 export type DelegateAuditStatus = 'succ' | 'fail' | 'auth_denied';
 
@@ -19,6 +20,22 @@ export interface UserDraft {
   password: string;
   email: string;
   status: UserStatus;
+}
+
+export interface UserRole {
+  id: string;
+  platform: string;
+  uid: string;
+  uname: string;
+  role: UserRoleName;
+  update_time: string;
+}
+
+export interface UserRoleDraft {
+  platform: string;
+  uid: string;
+  uname: string;
+  role: UserRoleName;
 }
 
 export interface PromptTemplate {
