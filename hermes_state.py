@@ -52,6 +52,7 @@ from hermes_state_common import (  # noqa: F401  (re-exported for back-compat)
     _FTS_CJK_TRIGGERS,
     _FTS_TRIGGERS,
     _LISTABLE_CHILD_SQL,
+    _LISTABLE_CHILD_WITH_CONTINUATIONS_SQL,
     _PREVIEW_RAW_SELECT,
     _ephemeral_child_sql,
     _shape_preview,
@@ -6547,26 +6548,33 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         return cleaned
 
-    def _is_compression_ancestor(
+    def _is_lineage_ancestor(
         self, conn, *, ancestor_id: str, descendant_id: str
     ) -> bool:
-        """Return True if *ancestor_id* is a compression predecessor of
+        """Return True if *ancestor_id* is a compression/reset predecessor of
         *descendant_id* (walking parent links up the continuation chain).
 
-        The continuation edge is the canonical one shared with
-        :func:`_ephemeral_child_sql` / :meth:`set_session_archived`
-        (``_COMPRESSION_CHILD_SQL``): a parent → child edge counts only when the
-        parent ended with ``end_reason = 'compression'`` and the child started
-        at or after the parent's ``ended_at``, which distinguishes continuations
-        from delegate subagents / branch children that also carry a
-        ``parent_session_id``. Expressed as a single recursive CTE rather than a
-        per-hop Python walk so the edge definition lives in exactly one place.
+        A parent → child edge counts when the parent ended with
+        ``end_reason`` of ``'compression'`` OR ``'session_reset'`` (``/new``) —
+        the same two boundaries :meth:`set_session_archived` /
+        :meth:`set_session_pinned` / :meth:`set_session_read` cascade across,
+        and the same reasoning as :meth:`_get_listing_continuation_tip`.
+        Deliberately a separate edge from ``_COMPRESSION_CHILD_SQL`` (used by
+        ``_ephemeral_child_sql`` for legacy schema migration) rather than
+        widening that shared constant. Expressed as a single recursive CTE
+        rather than a per-hop Python walk so the edge definition lives in
+        exactly one place.
         """
         if not ancestor_id or not descendant_id or ancestor_id == descendant_id:
             return False
-        # Walk parent links up from the descendant, following only compression
-        # continuation edges, and check whether ancestor_id is reached.
-        edge = _COMPRESSION_CHILD_SQL.format(a="child")
+        # Walk parent links up from the descendant, following only
+        # compression/reset continuation edges, and check whether
+        # ancestor_id is reached.
+        edge = (
+            "EXISTS (SELECT 1 FROM sessions p"
+            " WHERE p.id = child.parent_session_id"
+            " AND p.end_reason IN ('compression', 'session_reset'))"
+        )
         row = conn.execute(
             f"""
             WITH RECURSIVE ancestors(id) AS (
@@ -6629,18 +6637,19 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 conflict = cursor.fetchone()
                 if conflict:
                     conflict_id = conflict["id"]
-                    # A compression continuation is the live, projected-forward
-                    # head of its conversation; its compressed predecessors are
-                    # ended and hidden from the session list (list_sessions_rich
-                    # projects roots → tip). When the title that "conflicts" is
-                    # held by such a hidden ancestor, the user has no way to free
-                    # it — renaming the visible tip back to the base name would
-                    # dead-end with "already in use by <session they can't see>".
-                    # Treat this as a transfer: move the title off the ancestor
-                    # onto the continuation. Uniqueness is preserved (still only
-                    # one session carries the exact title) and the parent-link
-                    # lineage is untouched.
-                    if self._is_compression_ancestor(
+                    # A compression continuation or a /new-reset tip is the
+                    # live, projected-forward head of its conversation; its
+                    # predecessors are ended and hidden from the session list
+                    # (list_sessions_rich projects roots → tip). When the
+                    # title that "conflicts" is held by such a hidden
+                    # ancestor, the user has no way to free it — renaming the
+                    # visible tip back to the base name would dead-end with
+                    # "already in use by <session they can't see>". Treat
+                    # this as a transfer: move the title off the ancestor
+                    # onto the continuation. Uniqueness is preserved (still
+                    # only one session carries the exact title) and the
+                    # parent-link lineage is untouched.
+                    if self._is_lineage_ancestor(
                         conn, ancestor_id=conflict_id, descendant_id=session_id
                     ):
                         conn.execute(
@@ -6773,10 +6782,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         Archived sessions are hidden from the default session list but keep all
         their messages — this is a soft hide, not a delete. For compression
-        chains, archive the whole logical conversation. Desktop lists compression
-        roots projected forward to their latest continuation; updating only the
-        displayed tip lets the still-unarchived root resurrect it on refresh.
-        Returns True when at least one row was updated.
+        chains AND /new resets, archive the whole logical conversation.
+        Desktop/AISOC list these roots projected forward to their latest
+        continuation; updating only the displayed tip lets the
+        still-unarchived root resurrect it on refresh — and, symmetrically,
+        an old reset root left un-cascaded is exactly the row
+        ``list_sessions_rich`` reads ``archived`` from for the whole
+        projected row, so archiving only the tip would silently un-list a
+        live /new'd conversation the moment the stale root also gets swept
+        (see :meth:`archive_stale_sessions`). Returns True when at least one
+        row was updated.
         """
         def _do(conn):
             cursor = conn.execute(
@@ -6789,7 +6804,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     FROM ancestors a
                     JOIN sessions child ON child.id = a.id
                     JOIN sessions parent ON parent.id = child.parent_session_id
-                    WHERE parent.end_reason = 'compression'
+                    WHERE parent.end_reason IN ('compression', 'session_reset')
                   ),
                   descendants(id) AS (
                     SELECT ?
@@ -6798,7 +6813,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     FROM descendants d
                     JOIN sessions parent ON parent.id = d.id
                     JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.end_reason = 'compression'
+                    WHERE parent.end_reason IN ('compression', 'session_reset')
                   ),
                   lineage(id) AS (
                     SELECT id FROM ancestors
@@ -6819,16 +6834,19 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         return rowcount > 0
 
     def set_session_pinned(self, session_id: str, pinned: bool) -> bool:
-        """Pin or unpin a session (and its whole compression lineage).
+        """Pin or unpin a session (and its whole compression/reset lineage).
 
         ``pinned`` is a durable "keep" flag: pinned sessions are exempt from
         the ``sessions.auto_archive`` stale sweep (see
         :meth:`archive_stale_sessions`). Desktop is the current writer — its
         sidebar pins mirror here so a backend/other-surface sweep honours
-        them. Like :meth:`set_session_archived` the whole compression chain is
-        flipped as a unit, so pinning the surfaced tip protects the root (and
-        vice-versa) no matter which id the caller holds. Returns True when at
-        least one row changed.
+        them. Like :meth:`set_session_archived` the whole compression-or-reset
+        chain is flipped as a unit, so pinning the surfaced tip protects the
+        root (and vice-versa) no matter which id the caller holds — a pin
+        recorded only on the tip would have no visible effect, since
+        ``include_pinned`` back-fill in ``list_sessions_rich`` reads
+        ``pinned`` off the root row, not the projected tip. Returns True when
+        at least one row changed.
         """
         def _do(conn):
             cursor = conn.execute(
@@ -6841,7 +6859,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     FROM ancestors a
                     JOIN sessions child ON child.id = a.id
                     JOIN sessions parent ON parent.id = child.parent_session_id
-                    WHERE parent.end_reason = 'compression'
+                    WHERE parent.end_reason IN ('compression', 'session_reset')
                   ),
                   descendants(id) AS (
                     SELECT ?
@@ -6850,7 +6868,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     FROM descendants d
                     JOIN sessions parent ON parent.id = d.id
                     JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.end_reason = 'compression'
+                    WHERE parent.end_reason IN ('compression', 'session_reset')
                   ),
                   lineage(id) AS (
                     SELECT id FROM ancestors
@@ -6871,7 +6889,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         return rowcount > 0
 
     def set_session_read(self, session_id: str, read: bool = True) -> bool:
-        """Mark a session read or unread (and its whole compression lineage).
+        """Mark a session read or unread (and its whole compression/reset lineage).
 
         Read state is a watermark, not a flag: ``last_read_at`` records when
         the conversation was last read, and it counts as unread when activity
@@ -6886,9 +6904,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         * timestamp — read up to that moment.
 
         Like :meth:`set_session_archived` / :meth:`set_session_pinned`, the
-        whole compression chain is stamped as a unit, so reading the surfaced
-        tip clears the root (and vice-versa) no matter which id the caller
-        holds. Returns True when at least one row changed.
+        whole compression-or-reset chain is stamped as a unit, so reading the
+        surfaced tip clears the root (and vice-versa) no matter which id the
+        caller holds — ``list_sessions_rich``'s ``unread`` derivation compares
+        the *root* row's ``last_read_at`` against the tip's activity, and
+        relies on this cascade to keep the two in sync. Returns True when at
+        least one row changed.
         """
         def _do(conn):
             cursor = conn.execute(
@@ -6901,7 +6922,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     FROM ancestors a
                     JOIN sessions child ON child.id = a.id
                     JOIN sessions parent ON parent.id = child.parent_session_id
-                    WHERE parent.end_reason = 'compression'
+                    WHERE parent.end_reason IN ('compression', 'session_reset')
                   ),
                   descendants(id) AS (
                     SELECT ?
@@ -6910,7 +6931,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     FROM descendants d
                     JOIN sessions parent ON parent.id = d.id
                     JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.end_reason = 'compression'
+                    WHERE parent.end_reason IN ('compression', 'session_reset')
                   ),
                   lineage(id) AS (
                     SELECT id FROM ancestors
@@ -7022,6 +7043,60 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         return f"{base} #{max_num + 1}"
 
+    def _walk_continuation_chain(
+        self, session_id: str, boundary_reasons: Tuple[str, ...]
+    ) -> Optional[str]:
+        """Shared walk behind ``get_compression_tip`` and the listing tip.
+
+        Follows children of parents whose ``end_reason`` is in
+        ``boundary_reasons``, excluding branch/delegate/tool children and
+        preferring children that themselves sit on a boundary or are still
+        live over stale closed siblings such as ``ws_orphan_reap`` — see
+        ``get_compression_tip`` for the full rationale (the same brittleness
+        with ``started_at`` timestamp races applies here). Returns the
+        latest continuation tip, or the input id when no continuation
+        exists.
+        """
+        current = session_id
+        seen = {current} if current else set()
+        reasons_sql = ",".join("?" for _ in boundary_reasons)
+        # Bound the walk defensively — chains this deep are pathological
+        # and shouldn't happen in practice. 100 = plenty.
+        for _ in range(100):
+            with self._lock:
+                cursor = self._conn.execute(
+                    f"""
+                    SELECT child.id
+                    FROM sessions parent
+                    JOIN sessions child ON child.parent_session_id = parent.id
+                    WHERE parent.id = ?
+                      AND parent.end_reason IN ({reasons_sql})
+                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                      AND COALESCE(child.source, '') != 'tool'
+                    ORDER BY
+                      CASE
+                        WHEN child.end_reason IN ({reasons_sql}) THEN 0
+                        WHEN child.ended_at IS NULL THEN 1
+                        ELSE 2
+                      END,
+                      {_sql_session_last_active("child")} DESC,
+                      child.started_at DESC,
+                      child.id DESC
+                    LIMIT 1
+                    """,
+                    (current, *boundary_reasons, *boundary_reasons),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                return current
+            child_id = row["id"]
+            if not child_id or child_id in seen:
+                return current
+            seen.add(child_id)
+            current = child_id
+        return current
+
     def get_compression_tip(self, session_id: str) -> Optional[str]:
         """Walk the compression-continuation chain forward and return the tip.
 
@@ -7042,45 +7117,34 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         or still live over stale closed siblings such as ``ws_orphan_reap``.
         Returns the latest continuation tip, or the input id when no
         continuation exists.
+
+        Deliberately does NOT cross a ``/new`` (``end_reason='session_reset'``)
+        boundary: gateway routing, ``/resume``, and cron scheduling all resolve
+        "the session" through this method, and ``/new`` only works as a reset
+        because that resolution stops here instead of walking forward into the
+        session it just started. See ``_get_listing_continuation_tip`` for the
+        session-*list* projection, which wants the opposite.
         """
-        current = session_id
-        seen = {current} if current else set()
-        # Bound the walk defensively — compression chains this deep are
-        # pathological and shouldn't happen in practice. 100 = plenty.
-        for _ in range(100):
-            with self._lock:
-                cursor = self._conn.execute(
-                    f"""
-                    SELECT child.id
-                    FROM sessions parent
-                    JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.id = ?
-                      AND parent.end_reason = 'compression'
-                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
-                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
-                      AND COALESCE(child.source, '') != 'tool'
-                    ORDER BY
-                      CASE
-                        WHEN child.end_reason = 'compression' THEN 0
-                        WHEN child.ended_at IS NULL THEN 1
-                        ELSE 2
-                      END,
-                      {_sql_session_last_active("child")} DESC,
-                      child.started_at DESC,
-                      child.id DESC
-                    LIMIT 1
-                    """,
-                    (current,),
-                )
-                row = cursor.fetchone()
-            if row is None:
-                return current
-            child_id = row["id"]
-            if not child_id or child_id in seen:
-                return current
-            seen.add(child_id)
-            current = child_id
-        return current
+        return self._walk_continuation_chain(session_id, ("compression",))
+
+    def _get_listing_continuation_tip(self, session_id: str) -> Optional[str]:
+        """Like ``get_compression_tip``, but also crosses a ``/new`` reset.
+
+        ``list_sessions_rich``'s projection wants one row per conversation
+        slot the user experiences as continuous. A compression split already
+        qualifies; a ``/new``/``/reset`` (``end_reason='session_reset'``) is
+        the same kind of boundary from the list's point of view — without
+        this, the post-reset session has ``parent_session_id`` set (so
+        ``_LISTABLE_CHILD_SQL`` hides it as a "child") but is never projected
+        forward either (only ``end_reason='compression'`` roots were), so it
+        never appears on any page, findable only via message search
+        (hermes-agent#93552). Kept separate from ``get_compression_tip``:
+        see that method's docstring for why routing/resume/cron must NOT
+        cross this boundary.
+        """
+        return self._walk_continuation_chain(
+            session_id, ("compression", "session_reset")
+        )
 
     # Columns excluded from compact_rows projections: only the payload-heavy
     # blob no list consumer renders. Everything else — including gateway
@@ -7143,6 +7207,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         session_key: str = None,
         user_id: str = None,
         include_ownerless: bool = False,
+        include_continuation_children: bool = False,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -7192,6 +7257,13 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         obey the same filters (source, archived, min_message_count) as the
         page: an archived or filtered-out conversation stays out.
 
+        Pass ``include_continuation_children=True`` to ALSO surface
+        compression / session_reset (/new) continuation children as their own
+        rows. Together with ``project_compression_tips=False`` this gives
+        callers a list where every reset session appears separately instead of
+        being projected/hidden behind its latest tip. Subagent (delegate) runs
+        stay hidden either way.
+
         Pass ``session_key`` to restrict results to one stable gateway
         conversation scope (DM, group, channel, or thread, including the
         configured per-user isolation policy).
@@ -7212,7 +7284,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         where_clauses = []
         params = []
 
-        if not include_children:
+        if include_continuation_children:
+            # Surface compression / session_reset continuation children as
+            # their own list rows (roots and branches stay visible too).
+            # Delegate (subagent) runs are excluded inside the SQL constant.
+            where_clauses.append(_LISTABLE_CHILD_WITH_CONTINUATIONS_SQL)
+        elif not include_children:
             # Show root sessions and branch sessions, while still hiding
             # sub-agent runs and compression continuations (which also carry a
             # parent_session_id but were spawned while the parent was still
@@ -7277,26 +7354,33 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # session-id search) don't have to fetch every row and filter in
         # Python. ``id_query`` is matched as a case-insensitive substring
         # against each surfaced row's id AND every id in its forward
-        # compression chain — so searching a compression *root* id or a *tip*
-        # id both resolve to the same projected conversation. Only used in the
-        # order_by_last_active path (which builds the chain CTE); other callers
-        # pass id_query=None.
+        # continuation chain (compression splits and /new resets alike) — so
+        # searching a chain *root* id or a *tip* id both resolve to the same
+        # projected conversation. Only used in the order_by_last_active path
+        # (which builds the chain CTE); other callers pass id_query=None.
         id_needle = (id_query or "").strip().lower()
         search_needle = (search_query or "").strip().lower()
         if order_by_last_active:
             # Compute effective_last_active by walking each surfaced session's
-            # compression-continuation chain forward in SQL and taking the MAX
-            # timestamp across the chain. This lets us ORDER BY + LIMIT at SQL
-            # level instead of fetching every row and sorting in Python, while
-            # still surfacing old compression roots whose live tip is fresh.
+            # continuation chain forward in SQL and taking the MAX timestamp
+            # across the chain. This lets us ORDER BY + LIMIT at SQL level
+            # instead of fetching every row and sorting in Python, while
+            # still surfacing old roots whose live tip is fresh. "Continuation"
+            # covers both a compression split and a /new reset
+            # (end_reason='session_reset') — same rationale as
+            # _get_listing_continuation_tip: without the reset half, a /new'd
+            # session's own recent activity wouldn't pull its (correctly
+            # projected, per project_compression_tips below) row up to where
+            # it belongs, and a reset chain longer than one page's LIMIT could
+            # even sort its projected row off the page entirely.
             #
             # The CTE seeds from rows the outer WHERE admits (roots + branch
             # children), then recursively joins forward through robust
-            # compression-continuation edges. Do NOT require
-            # child.started_at >= parent.ended_at here: real desktop/gateway
-            # races can insert the continuation row before the parent's
-            # ended_at is written, while stale websocket siblings may satisfy
-            # the timestamp test and hijack resume/list projection.
+            # continuation edges. Do NOT require child.started_at >=
+            # parent.ended_at here: real desktop/gateway races can insert the
+            # continuation row before the parent's ended_at is written, while
+            # stale websocket siblings may satisfy the timestamp test and
+            # hijack resume/list projection.
             outer_where = where_sql
             id_params: List[Any] = []
             filter_clauses: List[str] = []
@@ -7353,7 +7437,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     FROM chain c
                     JOIN sessions parent ON parent.id = c.cur_id
                     JOIN sessions child ON child.parent_session_id = c.cur_id
-                    WHERE parent.end_reason = 'compression'
+                    WHERE parent.end_reason IN ('compression', 'session_reset')
                       AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
                       AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
                       AND COALESCE(child.source, '') != 'tool'
@@ -7455,23 +7539,29 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 seen_ids.add(s["id"])
                 sessions.append(s)
 
-        # Project compression roots forward to their tips. Each row whose
-        # end_reason is 'compression' has a continuation child; replace the
-        # surfaced fields (id, message_count, title, last_active, ended_at,
-        # end_reason, preview) with the tip's values so the list entry acts
-        # as the live conversation. Keep the root's started_at to preserve
-        # chronological ordering by original conversation start.
-        if project_compression_tips and not include_children:
-            # get_compression_tip() walks each root's chain individually (it's
-            # a per-session graph walk, not batchable in one query), but the
-            # tip *row* fetch afterward was previously one _get_session_rich_row()
-            # call per compression root. Batch that half instead: resolve
-            # every tip id first, then fetch all tip rows in a single query.
+        # Project compression roots AND /new-reset roots forward to their
+        # tips. Each row whose end_reason is 'compression' or 'session_reset'
+        # has a continuation child; replace the surfaced fields (id,
+        # message_count, title, last_active, ended_at, end_reason, preview)
+        # with the tip's values so the list entry acts as the live
+        # conversation. Keep the root's started_at to preserve chronological
+        # ordering by original conversation start. Without the
+        # 'session_reset' half, a /new'd session has parent_session_id set
+        # (so _LISTABLE_CHILD_SQL hides it as a "child") but was never
+        # projected forward either — it never appeared on any page, only
+        # findable via message search (hermes-agent#93552).
+        if project_compression_tips and not include_children and not include_continuation_children:
+            # _get_listing_continuation_tip() walks each root's chain
+            # individually (it's a per-session graph walk, not batchable in
+            # one query), but the tip *row* fetch afterward was previously
+            # one _get_session_rich_row() call per root. Batch that half
+            # instead: resolve every tip id first, then fetch all tip rows
+            # in a single query.
             tip_ids_by_root: Dict[str, str] = {}
             for s in sessions:
-                if s.get("end_reason") != "compression":
+                if s.get("end_reason") not in ("compression", "session_reset"):
                     continue
-                tip_id = self.get_compression_tip(s["id"])
+                tip_id = self._get_listing_continuation_tip(s["id"])
                 if tip_id != s["id"]:
                     tip_ids_by_root[s["id"]] = tip_id
 
@@ -10079,10 +10169,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
           * ``pinned = 0`` when ``exclude_pinned`` (the Desktop "keep" flag).
           * ``archived = 0`` so repeat runs are idempotent no-ops.
           * only lineage *tips* / standalone rows are candidates
-            (``end_reason <> 'compression'``); a stale tip archives its whole
-            chain via :meth:`set_session_archived`, so we never resurrect an
-            active conversation by matching an old compressed-away root whose
-            live continuation is recent.
+            (``end_reason NOT IN ('compression', 'session_reset')``); a stale
+            tip archives its whole chain via :meth:`set_session_archived`, so
+            we never resurrect an active conversation by matching an old
+            compressed-away (or /new-reset) root whose live continuation is
+            recent. Without excluding ``session_reset`` here too, a reset
+            root — always "idle" by the time this sweep runs, since it never
+            receives another message after the reset — would be swept and
+            archived on its own, silently un-listing the still-live tip
+            projected onto it (``list_sessions_rich`` reads ``archived`` off
+            the root row).
 
         Returns the number of sessions archived. Never raises for an empty or
         non-positive ``idle_days`` — it simply archives nothing.
@@ -10096,7 +10192,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 f"""
                 SELECT s.id FROM sessions s
                 WHERE s.archived = 0
-                  AND COALESCE(s.end_reason, '') <> 'compression'
+                  AND COALESCE(s.end_reason, '') NOT IN ('compression', 'session_reset')
                   {pin_clause}
                   AND {_sql_session_last_active("s")} < ?
                 ORDER BY s.started_at ASC
