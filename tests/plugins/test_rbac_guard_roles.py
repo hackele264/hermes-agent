@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sqlite3
+import sys
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+
+
+PLUGIN_ROLES = Path(__file__).resolve().parents[2] / "plugins" / "rbac-guard" / "roles.py"
+PLUGIN_INIT = PLUGIN_ROLES.with_name("__init__.py")
+
+
+@pytest.fixture
+def rbac_roles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    module_name = f"rbac_guard_roles_test_{id(tmp_path)}"
+    spec = importlib.util.spec_from_file_location(module_name, PLUGIN_ROLES)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    yield module
+    module.close_role_db()
+
+
+def test_role_lookup_reads_aegis_user_roles_dynamically(rbac_roles: ModuleType) -> None:
+    assert rbac_roles.role_for("feishu", "u-1") == "user"
+
+    assert rbac_roles.set_role("feishu", "u-1", "admin") is True
+    assert rbac_roles.role_for("feishu", "u-1") == "admin"
+
+    with sqlite3.connect(rbac_roles._ROLE_DB_PATH) as connection:
+        connection.execute(
+            "UPDATE user_roles SET role = 'user' WHERE platform = 'feishu' AND uid = 'u-1'"
+        )
+        connection.commit()
+
+    assert rbac_roles.role_for("feishu", "u-1") == "user"
+    assert rbac_roles.get_role("feishu", "u-1")["summary"] == "只读：只能看，不能改，允许委派"
+
+
+def test_role_rules_are_loaded_from_json_without_rank(
+    rbac_roles: ModuleType,
+) -> None:
+    assert set(rbac_roles.ROLE_RULES) == {"admin", "operator", "user"}
+    for rule in rbac_roles.ROLE_RULES.values():
+        assert "rank" not in rule
+        assert set(rule) == {
+            "summary",
+            "prompt_constraints",
+            "allow_tools",
+            "denied_tools",
+            "tools_paras",
+        }
+
+    assert rbac_roles.set_role("feishu", "u-3", "user") is True
+    prompt = rbac_roles.prompt_block("feishu", "u-3")
+    assert "rank" not in prompt
+    assert "tools_paras" not in prompt
+    assert "工具参数约束" not in prompt
+
+
+def test_invalid_role_rules_config_fails_validation(
+    rbac_roles: ModuleType,
+    tmp_path: Path,
+) -> None:
+    valid = json.loads(rbac_roles._ROLE_RULES_PATH.read_text(encoding="utf-8"))
+
+    missing_role = dict(valid)
+    missing_role.pop("admin")
+    missing_path = tmp_path / "missing-role.json"
+    missing_path.write_text(json.dumps(missing_role), encoding="utf-8")
+    with pytest.raises(rbac_roles.RoleRulesConfigError):
+        rbac_roles._load_role_rules(missing_path)
+
+    invalid_regex = json.loads(json.dumps(valid))
+    invalid_regex["user"]["tools_paras"] = {"terminal": {"command": "["}}
+    regex_path = tmp_path / "invalid-regex.json"
+    regex_path.write_text(json.dumps(invalid_regex), encoding="utf-8")
+    with pytest.raises(rbac_roles.RoleRulesConfigError):
+        rbac_roles._load_role_rules(regex_path)
+
+    legacy_rank = json.loads(json.dumps(valid))
+    legacy_rank["admin"]["rank"] = 100
+    rank_path = tmp_path / "legacy-rank.json"
+    rank_path.write_text(json.dumps(legacy_rank), encoding="utf-8")
+    with pytest.raises(rbac_roles.RoleRulesConfigError):
+        rbac_roles._load_role_rules(rank_path)
+
+
+def test_legacy_unknown_role_is_removed_from_plugin_config(
+    rbac_roles: ModuleType,
+    tmp_path: Path,
+) -> None:
+    valid = json.loads(rbac_roles._ROLE_RULES_PATH.read_text(encoding="utf-8"))
+    valid["unknown"] = {
+        "summary": "Legacy fallback",
+        "prompt_constraints": [],
+        "allow_tools": ["rbac_status"],
+        "denied_tools": [],
+        "tools_paras": {},
+    }
+    path = tmp_path / "legacy-role-rules.json"
+    path.write_text(json.dumps(valid), encoding="utf-8")
+
+    loaded = rbac_roles._load_role_rules(path)
+
+    assert set(loaded) == {"admin", "operator", "user"}
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert set(persisted) == {"admin", "operator", "user"}
+
+
+def test_tools_paras_requires_every_configured_parameter_to_match(
+    rbac_roles: ModuleType,
+) -> None:
+    role = rbac_roles.get_role("cli", "local")
+    role["allow_tools"] = None
+    role["denied_tools"] = []
+    role["tools_paras"] = {
+        "terminal": {
+            "command": r"^ls",
+            "cwd": r"/workspace",
+        }
+    }
+
+    assert rbac_roles.tool_allowed(role, "terminal") is True
+    assert rbac_roles.tool_params_allowed(
+        role,
+        "terminal",
+        {"command": "ls -la", "cwd": "/workspace/project"},
+    ) == (True, "")
+    assert rbac_roles.tool_params_allowed(
+        role,
+        "terminal",
+        {"command": "rm -rf /", "cwd": "/workspace/project"},
+    )[0] is False
+    assert rbac_roles.tool_params_allowed(
+        role,
+        "terminal",
+        {"command": "ls -la"},
+    )[0] is False
+    assert rbac_roles.tool_params_allowed(role, "read_file", {}) == (True, "")
+
+
+def test_tools_paras_also_constrains_admin_and_denied_tools_win(
+    rbac_roles: ModuleType,
+) -> None:
+    admin = rbac_roles.ROLE_RULES["admin"]
+    admin["tools_paras"] = {"terminal": {"command": r"^ls"}}
+    assert rbac_roles.tool_allowed(admin, "terminal") is True
+    assert rbac_roles.tool_params_allowed(admin, "terminal", {"command": "rm"})[0] is False
+
+    admin["denied_tools"] = ["terminal"]
+    assert rbac_roles.tool_allowed(admin, "terminal") is False
+
+    allow_and_deny = {"allow_tools": ["terminal"], "denied_tools": ["terminal"]}
+    assert rbac_roles.tool_allowed(allow_and_deny, "terminal") is False
+
+
+def test_plugin_hook_enforces_parameter_rules_and_status_has_no_rank(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HERMES_RBAC_AUDIT", str(tmp_path / "audit.log"))
+
+    module_name = f"rbac_guard_plugin_test_{id(tmp_path)}"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        PLUGIN_INIT,
+        submodule_search_locations=[str(PLUGIN_INIT.parent)],
+    )
+    assert spec is not None and spec.loader is not None
+    plugin = importlib.util.module_from_spec(spec)
+    plugin.__package__ = module_name
+    plugin.__path__ = [str(PLUGIN_INIT.parent)]
+    sys.modules[module_name] = plugin
+    try:
+        spec.loader.exec_module(plugin)
+        plugin.roles.ROLE_RULES["user"]["tools_paras"] = {
+            "read_file": {"path": r"^/safe"}
+        }
+        assert plugin.roles.set_role("cli", "u-4", "user") is True
+        plugin.on_pre_llm_call(session_id="session-4", platform="cli", sender_id="u-4")
+
+        assert plugin.on_pre_tool_call(
+            tool_name="read_file",
+            args={"path": "/safe/report.txt"},
+            session_id="session-4",
+        ) is None
+        blocked = plugin.on_pre_tool_call(
+            tool_name="read_file",
+            args={"path": "/etc/passwd"},
+            session_id="session-4",
+        )
+        assert blocked is not None
+        assert blocked["action"] == "block"
+
+        status = json.loads(plugin._tool_rbac_status({"platform": "cli", "user_id": "u-4"}))
+        assert "rank" not in status
+        assert status["tools_paras"] == {"read_file": {"path": r"^/safe"}}
+    finally:
+        plugin.roles.close_role_db()
+        sys.modules.pop(module_name, None)
+        sys.modules.pop("roles", None)
+
+
+def test_role_storage_uses_one_reusable_sqlite_connection(
+    rbac_roles: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_connect = rbac_roles.sqlite3.connect
+    connections: list[sqlite3.Connection] = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(rbac_roles.sqlite3, "connect", tracked_connect)
+
+    assert rbac_roles.role_for("telegram", "u-2") == "user"
+    assert rbac_roles.role_for("telegram", "u-2") == "user"
+    assert rbac_roles.set_role("telegram", "u-2", "operator") is True
+    assert rbac_roles.role_for("telegram", "u-2") == "operator"
+    assert len(connections) == 1
+
+
+def test_rbac_audit_is_disabled_by_default_and_requires_true(
+    rbac_roles: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit_path = tmp_path / "rbac-audit.log"
+    monkeypatch.setattr(rbac_roles, "_AUDIT_PATH", audit_path)
+    monkeypatch.delenv("AEGIS_RBAC_AUDIT", raising=False)
+
+    rbac_roles.audit("disabled_by_default")
+    assert not audit_path.exists()
+
+    monkeypatch.setenv("AEGIS_RBAC_AUDIT", "1")
+    rbac_roles.audit("not_exactly_true")
+    assert not audit_path.exists()
+
+    monkeypatch.setenv("AEGIS_RBAC_AUDIT", " true ")
+    rbac_roles.audit("enabled", identity="cli:local")
+    assert audit_path.exists()
+    assert '"event": "enabled"' in audit_path.read_text(encoding="utf-8")
+
+
+def test_set_role_only_accepts_roles_backed_by_the_database_table(
+    rbac_roles: ModuleType,
+) -> None:
+    assert rbac_roles.PERSISTED_ROLES == ("user", "operator", "admin")
+    assert rbac_roles.set_role("cli", "local", "viewer") is False
+    assert rbac_roles.role_for("cli", "local") == "user"
+
+    assert rbac_roles.set_role("cli", "local", "user") is True
+    with sqlite3.connect(rbac_roles._ROLE_DB_PATH) as connection:
+        row = connection.execute(
+            "SELECT platform, uid, uname, role FROM user_roles "
+            "WHERE platform = 'cli' AND uid = 'local'"
+        ).fetchone()
+    assert row == ("cli", "local", "local", "user")

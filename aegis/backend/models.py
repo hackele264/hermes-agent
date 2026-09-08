@@ -9,6 +9,8 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, TypeAdapter, fiel
 
 
 UserStatus = Literal["enabled", "disabled"]
+UserRoleName = Literal["user", "operator", "admin"]
+RbacRuleRole = Literal["admin", "operator", "user"]
 
 
 class UserResponse(BaseModel):
@@ -105,6 +107,115 @@ class UserPasswordUpdateResponse(BaseModel):
 class UserDeleteResponse(BaseModel):
     deleted: bool
     uid: str
+
+
+class UserRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: str = Field(min_length=1, max_length=128)
+    uid: str = Field(min_length=1, max_length=256)
+    uname: str = Field(min_length=1, max_length=256)
+    role: UserRoleName
+
+    @field_validator("platform", "uid", "uname", mode="before")
+    @classmethod
+    def require_nonblank_value(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("Value must not be blank.")
+        return normalized
+
+
+class UserRoleResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    platform: str
+    uid: str
+    uname: str
+    role: UserRoleName
+    update_time: str
+
+
+class UserRoleListResponse(BaseModel):
+    roles: list[UserRoleResponse] = Field(default_factory=list)
+
+
+class UserRoleDeleteResponse(BaseModel):
+    deleted: bool
+    id: str
+
+
+class RbacRule(BaseModel):
+    """One role's persisted RBAC rule configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(max_length=20_000)
+    prompt_constraints: list[str]
+    allow_tools: list[str] | None
+    denied_tools: list[str]
+    tools_paras: dict[str, dict[str, str]]
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def require_summary_string(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError("summary must be a string.")
+        return value
+
+    @field_validator("prompt_constraints", "allow_tools", "denied_tools", mode="before")
+    @classmethod
+    def require_string_lists(cls, value: object) -> object:
+        if value is None:
+            return value
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise TypeError("Tool and prompt constraint values must be arrays of strings.")
+        return value
+
+    @field_validator("tools_paras", mode="before")
+    @classmethod
+    def require_parameter_maps(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            raise TypeError("tools_paras must be an object of tool parameter maps.")
+        for tool_name, parameter_rules in value.items():
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ValueError("tools_paras tool names must be non-empty strings.")
+            if not isinstance(parameter_rules, dict):
+                raise TypeError("Each tools_paras tool value must be an object.")
+            for parameter_name, pattern in parameter_rules.items():
+                if not isinstance(parameter_name, str) or not parameter_name.strip():
+                    raise ValueError("tools_paras parameter names must be non-empty strings.")
+                if not isinstance(pattern, str):
+                    raise TypeError("tools_paras patterns must be strings.")
+        return value
+
+
+class RbacRulesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rules: dict[RbacRuleRole, RbacRule]
+
+
+class RbacRuleUpdateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: RbacRuleRole
+    rule: RbacRule
+    restart_required: bool
+
+
+class RbacRegexTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pattern: str = Field(max_length=20_000)
+    text: str = Field(max_length=20_000)
+
+
+class RbacRegexTestResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    matched: bool
 
 
 class PromptTemplateRequest(BaseModel):

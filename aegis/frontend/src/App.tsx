@@ -397,6 +397,7 @@ function AuthenticatedAppShell({
               onRefresh={onRefresh}
               onResetPassword={onResetUserPassword}
               onUpdateStatus={onToggleUserStatus}
+              onAuthExpired={onAuthExpired}
               users={users}
             />
           ) : null}

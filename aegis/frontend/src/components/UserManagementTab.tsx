@@ -1,7 +1,8 @@
-import { Fragment, FormEvent, useMemo, useState } from 'react';
+import { Fragment, FormEvent, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { KeyRound, Power, PowerOff, Trash2 } from 'lucide-react';
 import { alertApiError } from '../lib/api';
 import { AuthenticatedUser, UserDraft } from '../types';
+import UserRoleManagementTab from './UserRoleManagementTab';
 
 interface UserManagementTabProps {
   busy: boolean;
@@ -11,6 +12,7 @@ interface UserManagementTabProps {
   onRefresh: () => Promise<void>;
   onResetPassword: (uid: string, password: string) => Promise<void>;
   onUpdateStatus: (uid: string, status: 'enabled' | 'disabled') => Promise<void>;
+  onAuthExpired?: () => void;
 }
 
 const EMPTY_DRAFT: UserDraft = {
@@ -28,12 +30,29 @@ export default function UserManagementTab({
   onRefresh,
   onResetPassword,
   onUpdateStatus,
+  onAuthExpired,
 }: UserManagementTabProps) {
   const [draft, setDraft] = useState<UserDraft>(EMPTY_DRAFT);
   const [error, setError] = useState('');
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [resetPasswordUid, setResetPasswordUid] = useState('');
   const [resetPasswordValue, setResetPasswordValue] = useState('');
+  const [activeView, setActiveView] = useState<'users' | 'roles'>('users');
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  function handleTabKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    const currentIndex = event.currentTarget.dataset.index ? Number(event.currentTarget.dataset.index) : 0;
+    const nextIndex = event.key === 'ArrowRight' ? (currentIndex + 1) % 2
+      : event.key === 'ArrowLeft' ? (currentIndex + 1) % 2
+        : event.key === 'Home' ? 0
+          : event.key === 'End' ? 1
+            : -1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    const nextView = nextIndex === 0 ? 'users' : 'roles';
+    setActiveView(nextView);
+    tabRefs.current[nextIndex]?.focus();
+  }
 
   const sortedUsers = useMemo(
     () => [...users].sort((left, right) => left.username.localeCompare(right.username)),
@@ -114,7 +133,12 @@ export default function UserManagementTab({
           </div>
         </header>
 
-        <section className="aegis-page-content" aria-labelledby="user-directory-heading">
+        <div className="aegis-page-tabs aegis-page-tabs--compact" role="tablist" aria-label="用户页面视图">
+          <button ref={(element) => { tabRefs.current[0] = element; }} type="button" id="user-management-tab" role="tab" tabIndex={activeView === 'users' ? 0 : -1} aria-selected={activeView === 'users'} aria-controls="user-management-panel" data-index="0" onClick={() => setActiveView('users')} onKeyDown={handleTabKeyDown} className="aegis-page-tab">用户管理</button>
+          <button ref={(element) => { tabRefs.current[1] = element; }} type="button" id="role-management-tab" role="tab" tabIndex={activeView === 'roles' ? 0 : -1} aria-selected={activeView === 'roles'} aria-controls="role-management-panel" data-index="1" onClick={() => setActiveView('roles')} onKeyDown={handleTabKeyDown} className="aegis-page-tab">角色管理</button>
+        </div>
+
+        {activeView === 'roles' ? <UserRoleManagementTab onAuthExpired={onAuthExpired} /> : <section id="user-management-panel" role="tabpanel" aria-labelledby="user-management-tab" className="aegis-page-content">
           <header className="aegis-page-content__header aegis-page-content__header--compact">
             <div>
               <h2 id="user-directory-heading" className="aegis-page-content__title">User Directory</h2>
@@ -303,7 +327,7 @@ export default function UserManagementTab({
               </tbody>
             </table>
           </div>
-        </section>
+        </section>}
       </div>
     </main>
   );

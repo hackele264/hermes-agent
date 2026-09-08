@@ -1,6 +1,8 @@
 export type AgentStatus = 'Active' | 'Idle' | 'Offline';
 export type RoutingRuleStatus = 'Enabled' | 'Disabled';
 export type UserStatus = 'enabled' | 'disabled';
+export type UserRoleName = 'user' | 'operator' | 'admin';
+export type RbacRuleRole = 'admin' | 'operator' | 'user';
 export type AgentPolicyStatus = 'allow' | 'deny';
 export type DelegateAuditStatus = 'succ' | 'fail' | 'auth_denied';
 
@@ -19,6 +21,22 @@ export interface UserDraft {
   password: string;
   email: string;
   status: UserStatus;
+}
+
+export interface UserRole {
+  id: string;
+  platform: string;
+  uid: string;
+  uname: string;
+  role: UserRoleName;
+  update_time: string;
+}
+
+export interface UserRoleDraft {
+  platform: string;
+  uid: string;
+  uname: string;
+  role: UserRoleName;
 }
 
 export interface PromptTemplate {
@@ -167,6 +185,24 @@ export interface TaskAuditPage {
   total: number;
   page: number;
   page_size: number;
+}
+
+export interface RbacRule {
+  summary: string;
+  prompt_constraints: string[];
+  allow_tools: string[] | null;
+  denied_tools: string[];
+  tools_paras: Record<string, Record<string, string>>;
+}
+
+export interface RbacRulesResponse {
+  rules: Record<RbacRuleRole, RbacRule>;
+}
+
+export interface RbacRuleUpdateResponse {
+  role: RbacRuleRole;
+  rule: RbacRule;
+  restart_required: boolean;
 }
 
 export interface OverviewStatusCounts {

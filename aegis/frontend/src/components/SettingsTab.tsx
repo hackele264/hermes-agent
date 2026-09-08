@@ -9,6 +9,7 @@ import {
 } from '../lib/frontendSettings';
 import { useOptionalAegisChatRuntime } from '../lib/chatRuntime';
 import SystemInstructManager from './SystemInstructManager';
+import RbacRulesManager from './RbacRulesManager';
 
 interface HealthResponse {
   status: string;
@@ -22,11 +23,11 @@ interface RestartResponse {
   pid: number;
 }
 
-type SettingsView = 'status' | 'configuration' | 'license' | 'system_instruct';
+type SettingsView = 'status' | 'configuration' | 'license' | 'system_instruct' | 'rbac_rules';
 
 const RESTART_CONFIRMATION_PHRASE = 'RESTART AEGIS';
 const DEFAULT_RECOVERY_POLL_MS = 1_000;
-const SETTINGS_VIEWS: SettingsView[] = ['status', 'configuration', 'license', 'system_instruct'];
+const SETTINGS_VIEWS: SettingsView[] = ['status', 'configuration', 'license', 'rbac_rules', 'system_instruct'];
 const LICENSE_MOCK = {
   id: 'AEG-ENT-EVAL-2026-LOCAL',
   edition: 'Enterprise Evaluation',
@@ -354,6 +355,20 @@ export default function SettingsTab({
           </button>
           <button
             ref={(element) => { settingsTabRefs.current[3] = element; }}
+            id="settings-rbac-rules-tab"
+            type="button"
+            role="tab"
+            tabIndex={activeView === 'rbac_rules' ? 0 : -1}
+            aria-selected={activeView === 'rbac_rules'}
+            aria-controls="settings-rbac-rules-panel"
+            onClick={() => selectSettingsView('rbac_rules')}
+            onKeyDown={(event) => handleSettingsTabKeyDown(event, 'rbac_rules')}
+            className="aegis-page-tab"
+          >
+            RBAC Rules
+          </button>
+          <button
+            ref={(element) => { settingsTabRefs.current[4] = element; }}
             id="settings-system-instruct-tab"
             type="button"
             role="tab"
@@ -507,6 +522,10 @@ export default function SettingsTab({
 
         {activeView === 'system_instruct' ? <section id="settings-system-instruct-panel" role="tabpanel" aria-labelledby="settings-system-instruct-tab" className="aegis-page-content">
           <SystemInstructManager onAuthExpired={onAuthExpired} />
+        </section> : null}
+
+        {activeView === 'rbac_rules' ? <section id="settings-rbac-rules-panel" role="tabpanel" aria-labelledby="settings-rbac-rules-tab" className="aegis-page-content">
+          <RbacRulesManager onAuthExpired={onAuthExpired} />
         </section> : null}
       </div>
 
