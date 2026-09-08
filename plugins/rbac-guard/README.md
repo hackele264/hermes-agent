@@ -112,3 +112,16 @@ hermes plugins enable rbac-guard       # 启用（写 plugins.enabled）
 3. 强制未登记用户调用受限工具 → 工具被 core 拦截，返回 `[RBAC] 已拒绝`（硬控制 ✓）
 4. 提权 admin 后同一请求 → 命令真实执行，输出返回（放行 ✓）
 5. args 里伪造 `role=admin` → 判定不变（身份不可伪造 ✓）
+
+## tool paras 参数正则语法
+1. 包含匹配
+/output/
+
+2. 必须以 ls 开头
+^ls
+
+3. 必须完整匹配
+^ls -la$
+
+4. 禁止出现危险字符串
+^(?!.*(?:rm\s+-rf|shutdown)).*$

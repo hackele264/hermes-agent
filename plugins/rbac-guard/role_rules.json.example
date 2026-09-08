@@ -38,6 +38,9 @@
       },
       "patch": {
         "path": "/output/"
+      },
+      "read_file":{
+        "path": "^(?!.*(/aegiswiki/(commercialization|raw/business)))"
       }
     }
   }
