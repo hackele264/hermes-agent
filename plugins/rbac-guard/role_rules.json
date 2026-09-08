@@ -26,7 +26,8 @@
     "allow_tools": null,
     "denied_tools": [
       "memory",
-      "execute_code"
+      "execute_code",
+      "rbac_set_role"
     ],
     "tools_paras": {
       "write_file": {

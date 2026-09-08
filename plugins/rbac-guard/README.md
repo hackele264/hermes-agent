@@ -31,8 +31,10 @@ Hermes core: resolve_pre_tool_block()
 - `pre_tool_call` 返回 `{"action":"block","message":...}` 时由 core 的
   `hermes_cli.plugins.resolve_pre_tool_block()` 统一执行，审批门出错也会 fail-closed 成 block。
 - 群聊 session_key 只含群 ID（如 `agent:main:feishu:group:oc_xxx`），不含个人 uid。
-  本插件用 pre_llm_call 阶段的 platform+sender_id 建 `_IDENTITY_CACHE`（session_id → 身份），
-  工具层优先从缓存取个人身份，保证两层看到同一个用户。
+  本插件用 pre_llm_call 阶段的 platform+sender_id 建 `_IDENTITY_CACHE`
+  （`session_id:turn_id` → 身份），工具层优先从同一轮缓存取个人身份，
+  保证两层看到同一个用户。不能只按 session_id 缓存，否则同一群组 session
+  的不同用户会互相覆盖身份；缺少 turn_id 时不会读取 session 级缓存。
 - 身份永远来自 hook 注入的 platform/sender_id，**不接受 LLM 在 args 里自报角色**。
 
 ## 文件

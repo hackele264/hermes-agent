@@ -188,17 +188,52 @@ def test_plugin_hook_enforces_parameter_rules_and_status_has_no_rank(
             "read_file": {"path": r"^/safe"}
         }
         assert plugin.roles.set_role("cli", "u-4", "user") is True
-        plugin.on_pre_llm_call(session_id="session-4", platform="cli", sender_id="u-4")
+        plugin.on_pre_llm_call(
+            session_id="session-4",
+            platform="cli",
+            sender_id="u-4",
+            turn_id="turn-4",
+        )
+
+        # A shared group session must keep identities isolated per turn.
+        plugin.on_pre_llm_call(
+            session_id="shared-session",
+            platform="feishu",
+            sender_id="creator",
+            turn_id="turn-a",
+        )
+        plugin.on_pre_llm_call(
+            session_id="shared-session",
+            platform="feishu",
+            sender_id="participant",
+            turn_id="turn-b",
+        )
+        assert plugin._identity_cache_key("shared-session", "turn-a") == (
+            "shared-session:turn-a"
+        )
+        assert plugin.resolve_identity("shared-session", "turn-a") == (
+            "feishu",
+            "creator",
+        )
+        assert plugin.resolve_identity("shared-session", "turn-b") == (
+            "feishu",
+            "participant",
+        )
+        # A legacy call without turn_id must not fall back to either user's
+        # session-level identity.
+        assert plugin.resolve_identity("shared-session") == ("cli", "local")
 
         assert plugin.on_pre_tool_call(
             tool_name="read_file",
             args={"path": "/safe/report.txt"},
             session_id="session-4",
+            turn_id="turn-4",
         ) is None
         blocked = plugin.on_pre_tool_call(
             tool_name="read_file",
             args={"path": "/etc/passwd"},
             session_id="session-4",
+            turn_id="turn-4",
         )
         assert blocked is not None
         assert blocked["action"] == "block"

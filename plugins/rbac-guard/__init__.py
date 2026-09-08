@@ -32,23 +32,44 @@ _PLATFORM_RE = re.compile(r"agent:[^:]+:([A-Za-z0-9_\-]+):(group|channel|dm|thre
 
 
 # ---------------------------------------------------------------- 身份解析 ----
-# session_id -> (platform, uid)，由每轮 pre_llm_call 写入。
+# session_id:turn_id -> (platform, uid)，由每轮 pre_llm_call 写入。
 # 群聊场景下 session_key 只含群 ID，工具层必须用这里缓存的个人身份判定，
-# 保证 prompt 层与执行层看到的是同一个用户。
+# 保证 prompt 层与执行层看到的是同一个用户；不能只用 session_id，
+# 否则同一个共享 session 的不同用户会互相覆盖身份。
 _IDENTITY_CACHE: dict[str, tuple[str, str]] = {}
 _IDENTITY_CACHE_MAX = 512
 
 
-def _remember_identity(session_id: str, platform: str, sender_id: str) -> None:
-    if session_id and (platform or sender_id):
-        if len(_IDENTITY_CACHE) > _IDENTITY_CACHE_MAX:
+def _identity_cache_key(session_id: str = "", turn_id: str = "") -> str:
+    """Build the only cache key used for turn identity mappings."""
+    session = str(session_id or "").strip()
+    turn = str(turn_id or "").strip()
+    if not session or not turn:
+        return ""
+    return f"{session}:{turn}"
+
+
+def _remember_identity(
+    session_id: str,
+    turn_id: str,
+    platform: str,
+    sender_id: str,
+) -> None:
+    cache_key = _identity_cache_key(session_id, turn_id)
+    if cache_key and (platform or sender_id):
+        if len(_IDENTITY_CACHE) >= _IDENTITY_CACHE_MAX:
             _IDENTITY_CACHE.clear()  # 简单防膨胀
-        _IDENTITY_CACHE[session_id] = (platform or "cli", sender_id or "local")
+        _IDENTITY_CACHE[cache_key] = (platform or "cli", sender_id or "local")
 
 
-def resolve_identity(session_id: str) -> tuple[str, str]:
-    """工具/观察钩子的身份解析：优先取本轮 pre_llm_call 缓存的个人身份。"""
-    hit = _IDENTITY_CACHE.get(session_id)
+def resolve_identity(session_id: str, turn_id: str = "") -> tuple[str, str]:
+    """优先取本轮 ``session_id:turn_id`` 缓存的个人身份。
+
+    没有 turn_id 时不读取 session 级别的旧缓存，避免共享 session 中发生
+    身份串用；此时仅使用 session key 的兼容性解析结果。
+    """
+    cache_key = _identity_cache_key(session_id, turn_id)
+    hit = _IDENTITY_CACHE.get(cache_key) if cache_key else None
     if hit:
         return hit
     return parse_identity(session_key=session_id)
@@ -70,21 +91,21 @@ def parse_identity(session_key: str, platform: str = "", sender_id: str = "") ->
 
 
 # ------------------------------------------------------------------- hooks ----
-def on_pre_llm_call(session_id="", platform="", sender_id="", **kwargs):
+def on_pre_llm_call(session_id="", platform="", sender_id="", turn_id="", **kwargs):
     """每轮 LLM 调用前：查角色 → 注入角色约束块（软约束层）。
 
     返回 {"context": ...} 会被 Hermes 注入本轮 user message 顶部；
     这也是“任务开始时获取用户身份”的挂载点。
     """
     plat, uid = (platform or "cli"), (sender_id or "local")
-    _remember_identity(session_id, plat, uid)
+    _remember_identity(session_id, turn_id, plat, uid)
     block = roles.prompt_block(plat, uid)
     roles.audit("context_injected", identity=roles.identity_key(plat, uid),
                 session_id=session_id)
     return {"context": block}
 
 
-def on_pre_tool_call(tool_name="", args=None, session_id="", **kwargs):
+def on_pre_tool_call(tool_name="", args=None, session_id="", turn_id="", **kwargs):
     """每次工具执行前：角色硬控制 —— 放行 / block / 升级审批。
 
     返回值契约（hermes_cli.plugins._get_pre_tool_call_directive_details）：
@@ -93,7 +114,7 @@ def on_pre_tool_call(tool_name="", args=None, session_id="", **kwargs):
       其他/None                               → 放行
     审批门本身 fail-closed：gate 出错也会变成 block。
     """
-    plat, uid = resolve_identity(session_id)
+    plat, uid = resolve_identity(session_id, turn_id)
     role_name = roles.role_for(plat, uid)
     role = roles.get_role(plat, uid)
 
@@ -153,9 +174,11 @@ def _looks_dangerous(tool_name: str, args: dict) -> bool:
     return False
 
 
-def on_post_tool_call(tool_name="", args=None, result="", session_id="", **kwargs):
+def on_post_tool_call(
+    tool_name="", args=None, result="", session_id="", turn_id="", **kwargs
+):
     """观察者：审计日志（返回值被忽略）。"""
-    plat, uid = resolve_identity(session_id)
+    plat, uid = resolve_identity(session_id, turn_id)
     roles.audit("tool_executed", identity=roles.identity_key(plat, uid),
                 tool=tool_name, args=json.dumps(args or {}, ensure_ascii=False)[:500], ok=("error" not in str(result).lower()[:80]))
 
@@ -202,26 +225,26 @@ def register(ctx):
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
 
-    ctx.register_tool(
-        name="rbac_status",
-        toolset="rbac",
-        schema={
-            "name": "rbac_status",
-            "description": (
-                "查询 RBAC 角色信息：给定 platform + user_id，返回其角色、"
-                "权限约束、工具白/黑名单。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "platform": {"type": "string", "description": "平台名，如 feishu/telegram/cli"},
-                    "user_id": {"type": "string", "description": "平台用户 ID"},
-                },
-                "required": [],
-            },
-        },
-        handler=_tool_rbac_status,
-    )
+    # ctx.register_tool(
+    #     name="rbac_status",
+    #     toolset="rbac",
+    #     schema={
+    #         "name": "rbac_status",
+    #         "description": (
+    #             "查询 RBAC 角色信息：给定 platform + user_id，返回其角色、"
+    #             "权限约束、工具白/黑名单。"
+    #         ),
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "platform": {"type": "string", "description": "平台名，如 feishu/telegram/cli"},
+    #                 "user_id": {"type": "string", "description": "平台用户 ID"},
+    #             },
+    #             "required": [],
+    #         },
+    #     },
+    #     handler=_tool_rbac_status,
+    # )
 
     ctx.register_tool(
         name="rbac_set_role",
@@ -229,8 +252,7 @@ def register(ctx):
         schema={
             "name": "rbac_set_role",
             "description": (
-                "管理员专用：为 platform:user_id 设置 RBAC 角色。"
-                "注意：用户自己的角色永远由 hook 从会话身份解析，此工具只能改角色表。"
+                "需要operator以上角色:为 platform:user_id 设置 RBAC 角色(admin,operator,user)。"
             ),
             "parameters": {
                 "type": "object",
