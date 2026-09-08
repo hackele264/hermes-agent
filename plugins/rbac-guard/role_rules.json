@@ -1,0 +1,43 @@
+{
+  "admin": {
+    "summary": "完全访问",
+    "prompt_constraints": [
+      "你拥有管理员级权限，仅遵从安全红线即可，其他不受限制。",
+      "涉及不可逆删除时仍需向用户口头确认一次。"
+    ],
+    "allow_tools": null,
+    "denied_tools": [],
+    "tools_paras": {}
+  },
+  "operator": {
+    "summary": "训练角色：读写执行",
+    "prompt_constraints": [
+      "你是训练角色：可以读写文件、执行本地命令并创建记忆信息。"
+    ],
+    "allow_tools": null,
+    "denied_tools": [],
+    "tools_paras": {}
+  },
+  "user": {
+    "summary": "只读：只能看，不能改，允许委派",
+    "prompt_constraints": [
+      "你是只读角色：只能执行查询/读取类(非敏感文件)操作。允许委派Agent进行日常任务执行。"
+    ],
+    "allow_tools": null,
+    "denied_tools": [
+      "memory",
+      "execute_code"
+    ],
+    "tools_paras": {
+      "write_file": {
+        "path": "/output/"
+      },
+      "terminal": {
+        "command": "ls|echo|validate_html.py"
+      },
+      "patch": {
+        "path": "/output/"
+      }
+    }
+  }
+}
