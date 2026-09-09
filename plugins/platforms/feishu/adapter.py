@@ -437,6 +437,7 @@ class FeishuAdapterSettings:
     group_rules: Dict[str, FeishuGroupRule] = field(default_factory=dict)
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
+    reply_thread: bool = True
 
 
 @dataclass
@@ -683,6 +684,20 @@ def _escape_markdown_text(text: str) -> str:
 
 def _to_boolean(value: Any) -> bool:
     return value is True or value == 1 or value == "true"
+
+
+def _env_boolean_default_true(name: str) -> bool:
+    """Parse a user-facing boolean environment flag with a safe-on default."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return True
+    normalized = raw.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    logger.warning("[Feishu] Invalid %s=%r; defaulting to true", name, raw)
+    return True
 
 
 def _is_style_enabled(style: Dict[str, Any] | None, key: str) -> bool:
@@ -1755,12 +1770,88 @@ class FeishuAdapter(BasePlatformAdapter):
         # Feishu reaction deletion requires the opaque reaction_id returned
         # by create, so we cache it per message_id.
         self._pending_processing_reactions: "OrderedDict[str, str]" = OrderedDict()
+        # A top-level message is a prospective thread only until its first
+        # threaded reply succeeds. Failed roots stay flat for the remainder of
+        # the turn so progress/final/error paths do not repeatedly retry topic
+        # creation after the one-shot fallback.
+        self._pending_auto_thread_roots: "OrderedDict[str, None]" = OrderedDict()
+        self._failed_auto_thread_roots: "OrderedDict[str, None]" = OrderedDict()
         self._load_seen_message_ids()
 
     @staticmethod
     def _trim_oldest_dict_entries(mapping: Dict[Any, Any], max_size: int) -> None:
         while len(mapping) > max_size:
             mapping.pop(next(iter(mapping)), None)
+
+    def _reply_thread_enabled(self) -> bool:
+        configured = getattr(self, "_reply_thread_enabled_setting", None)
+        if configured is not None:
+            return bool(configured)
+        return _env_boolean_default_true("FEISHU_REPLY_THREAD")
+
+    @staticmethod
+    def _is_message_thread_anchor(thread_id: Any) -> bool:
+        """Return True when thread metadata carries a root message id.
+
+        Feishu message ids use ``om_*`` while real thread ids use ``omt_*``.
+        Auto-created lanes deliberately expose the former as ``source.thread_id``
+        so the initiating turn and later replies can share one session key.
+        """
+        return str(thread_id or "").startswith("om_")
+
+    def _auto_thread_state(self, name: str) -> "OrderedDict[str, None]":
+        state = getattr(self, name, None)
+        if state is None:
+            state = OrderedDict()
+            setattr(self, name, state)
+        return state
+
+    def _mark_auto_thread_pending(self, root_message_id: str) -> None:
+        pending = self._auto_thread_state("_pending_auto_thread_roots")
+        failed = self._auto_thread_state("_failed_auto_thread_roots")
+        failed.pop(root_message_id, None)
+        pending[root_message_id] = None
+        pending.move_to_end(root_message_id)
+        self._trim_oldest_dict_entries(pending, self.CHAT_LOCK_MAX_SIZE)
+
+    def _mark_auto_thread_established(self, root_message_id: str) -> None:
+        self._auto_thread_state("_pending_auto_thread_roots").pop(root_message_id, None)
+        self._auto_thread_state("_failed_auto_thread_roots").pop(root_message_id, None)
+
+    def _mark_auto_thread_failed(self, root_message_id: str) -> None:
+        self._auto_thread_state("_pending_auto_thread_roots").pop(root_message_id, None)
+        failed = self._auto_thread_state("_failed_auto_thread_roots")
+        failed[root_message_id] = None
+        failed.move_to_end(root_message_id)
+        self._trim_oldest_dict_entries(failed, self.CHAT_LOCK_MAX_SIZE)
+
+    def _session_exists_for_source(self, source: Any) -> bool:
+        """Check active and persisted routing state for a candidate source."""
+        try:
+            from gateway.session import build_session_key
+
+            extra = getattr(getattr(self, "config", None), "extra", None) or {}
+            session_key = build_session_key(
+                source,
+                group_sessions_per_user=extra.get("group_sessions_per_user", True),
+                thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+                profile=getattr(source, "profile", None),
+            )
+        except Exception:
+            logger.debug("[Feishu] Failed to build candidate auto-thread session key", exc_info=True)
+            return False
+
+        if session_key in (getattr(self, "_active_sessions", None) or {}):
+            return True
+        store = getattr(self, "_session_store", None)
+        peek = getattr(store, "peek_session_id", None)
+        if not callable(peek):
+            return False
+        try:
+            return bool(peek(session_key))
+        except Exception:
+            logger.debug("[Feishu] Failed to inspect candidate auto-thread session", exc_info=True)
+            return False
 
     @staticmethod
     def _load_settings(extra: Dict[str, Any]) -> FeishuAdapterSettings:
@@ -1862,6 +1953,7 @@ class FeishuAdapter(BasePlatformAdapter):
             require_mention=_to_boolean(
                 extra.get("require_mention", os.getenv("FEISHU_REQUIRE_MENTION", "true"))
             ),
+            reply_thread=_env_boolean_default_true("FEISHU_REPLY_THREAD"),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -1894,6 +1986,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_ping_timeout = settings.ws_ping_timeout
         self._allow_bots = settings.allow_bots
         self._require_mention = settings.require_mention
+        self._reply_thread_enabled_setting = settings.reply_thread
 
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
@@ -4266,7 +4359,9 @@ class FeishuAdapter(BasePlatformAdapter):
             if hint:
                 text = f"{hint}\n\n{text}" if text else hint
 
-        thread_id = getattr(message, "thread_id", None) or getattr(message, "root_id", None) or None
+        actual_thread_id = getattr(message, "thread_id", None) or None
+        root_message_id = getattr(message, "root_id", None) or None
+        thread_id = actual_thread_id or root_message_id or None
         reply_to_message_id = (
             getattr(message, "parent_id", None)
             or getattr(message, "upper_message_id", None)
@@ -4296,16 +4391,47 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_id = getattr(message, "chat_id", "") or ""
         chat_info = await self.get_chat_info(chat_id)
         sender_profile = await self._resolve_sender_profile(sender_id, is_bot=is_bot)
+        source_chat_type = self._resolve_source_chat_type(
+            chat_info=chat_info,
+            event_chat_type=chat_type,
+        )
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type=chat_type),
+            chat_type=source_chat_type,
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
             thread_id=thread_id,
             user_id_alt=sender_profile["user_id_alt"],
             is_bot=is_bot,
+            message_id=message_id,
         )
+        if (
+            self._reply_thread_enabled()
+            and source_chat_type in {"dm", "group"}
+            and not actual_thread_id
+            and not root_message_id
+            and message_id
+        ):
+            # Feishu creates the real ``omt_*`` thread only after the first
+            # reply. Key the initiating turn on its stable ``om_*`` root now;
+            # the send path treats this value as a reply anchor, not a receive
+            # id, and therefore creates the topic with reply_in_thread=true.
+            thread_id = str(message_id)
+            source.thread_id = thread_id
+            self._mark_auto_thread_pending(thread_id)
+        elif actual_thread_id and root_message_id:
+            # For a later message in an auto-created topic, reuse the root-keyed
+            # session only when that root already exists. Human-created topics
+            # keep their historical real-thread (omt_*) session identity.
+            real_thread_id = source.thread_id
+            source.thread_id = str(root_message_id)
+            if self._session_exists_for_source(source):
+                thread_id = source.thread_id
+                self._mark_auto_thread_established(str(root_message_id))
+            else:
+                source.thread_id = real_thread_id
+                thread_id = real_thread_id
         # Foreground A2A loops own their route before normal dispatch, text
         # batching, or per-chat serialization can turn a follow-up into a new
         # main-agent turn.  `text` has already had a leading bot mention
@@ -5775,6 +5901,8 @@ class FeishuAdapter(BasePlatformAdapter):
         """Fetch the last message_id in a thread for reply-based routing."""
         if not self._client or not thread_id:
             return None
+        if self._is_message_thread_anchor(thread_id):
+            return str(thread_id)
         try:
             from lark_oapi.api.im.v1 import ListMessageRequest
             request = (
@@ -5802,10 +5930,13 @@ class FeishuAdapter(BasePlatformAdapter):
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
     ) -> Any:
+        metadata_thread_id = (metadata or {}).get("thread_id")
         effective_reply_to = reply_to
-        if not effective_reply_to and metadata and metadata.get("thread_id"):
-            effective_reply_to = metadata.get("reply_to_message_id")
-        reply_in_thread = bool((metadata or {}).get("thread_id"))
+        if not effective_reply_to and metadata_thread_id:
+            effective_reply_to = (metadata or {}).get("reply_to_message_id")
+            if not effective_reply_to and self._is_message_thread_anchor(metadata_thread_id):
+                effective_reply_to = str(metadata_thread_id)
+        reply_in_thread = bool(metadata_thread_id)
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload,
@@ -5819,7 +5950,7 @@ class FeishuAdapter(BasePlatformAdapter):
         # For topic/thread messages that fell back from reply→create, use
         # thread_id as receive_id so the message lands in the topic instead of
         # the main chat.
-        _thread_id = (metadata or {}).get("thread_id")
+        _thread_id = metadata_thread_id
         if _thread_id:
             body = self._build_create_message_body(
                 receive_id=_thread_id,
@@ -6002,6 +6133,18 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Any:
         last_error: Optional[Exception] = None
         active_reply_to = reply_to
+        active_metadata = metadata
+        auto_thread_root = str((metadata or {}).get("thread_id") or "")
+        pending_roots = self._auto_thread_state("_pending_auto_thread_roots")
+        failed_roots = self._auto_thread_state("_failed_auto_thread_roots")
+        auto_thread_pending = bool(
+            self._is_message_thread_anchor(auto_thread_root)
+            and auto_thread_root in pending_roots
+        )
+        if auto_thread_root in failed_roots:
+            active_reply_to = None
+            active_metadata = None
+            auto_thread_root = ""
         for attempt in range(_FEISHU_SEND_ATTEMPTS):
             try:
                 response = await self._send_raw_message(
@@ -6009,19 +6152,48 @@ class FeishuAdapter(BasePlatformAdapter):
                     msg_type=msg_type,
                     payload=payload,
                     reply_to=active_reply_to,
-                    metadata=metadata,
+                    metadata=active_metadata,
                 )
+                if auto_thread_pending:
+                    if self._response_succeeded(response):
+                        self._mark_auto_thread_established(auto_thread_root)
+                        return response
+                    if (
+                        msg_type == "post"
+                        and _POST_CONTENT_INVALID_RE.search(
+                            str(getattr(response, "msg", "") or "")
+                        )
+                    ):
+                        # Let send() retry this payload as plain text while the
+                        # root remains pending; formatting rejection is not a
+                        # topic-creation failure.
+                        return response
+                    logger.warning(
+                        "[Feishu] Auto-thread reply to %s failed (code %s); "
+                        "falling back to one flat message in chat %s",
+                        auto_thread_root,
+                        getattr(response, "code", None),
+                        chat_id,
+                    )
+                    self._mark_auto_thread_failed(auto_thread_root)
+                    return await self._send_raw_message(
+                        chat_id=chat_id,
+                        msg_type=msg_type,
+                        payload=payload,
+                        reply_to=None,
+                        metadata=None,
+                    )
                 # If replying to a message failed because it was withdrawn or not found,
                 # fall back to posting a new message directly to the chat.
                 if active_reply_to and not self._response_succeeded(response):
                     code = getattr(response, "code", None)
                     if code in _FEISHU_REPLY_FALLBACK_CODES:
-                        if (metadata or {}).get("thread_id"):
+                        if (active_metadata or {}).get("thread_id"):
                             logger.warning(
                                 "[Feishu] Reply to %s failed in thread %s (code %s — message withdrawn/missing); "
                                 "skipping top-level fallback to avoid creating a new topic",
                                 active_reply_to,
-                                (metadata or {}).get("thread_id"),
+                                (active_metadata or {}).get("thread_id"),
                                 code,
                             )
                             return response
@@ -6038,7 +6210,7 @@ class FeishuAdapter(BasePlatformAdapter):
                             msg_type=msg_type,
                             payload=payload,
                             reply_to=None,
-                            metadata=metadata,
+                            metadata=active_metadata,
                         )
                 return response
             except Exception as exc:
@@ -6046,6 +6218,22 @@ class FeishuAdapter(BasePlatformAdapter):
                 if msg_type == "post" and _POST_CONTENT_INVALID_RE.search(str(exc)):
                     raise
                 if attempt >= _FEISHU_SEND_ATTEMPTS - 1:
+                    if auto_thread_pending:
+                        logger.warning(
+                            "[Feishu] Auto-thread reply to %s raised after retries; "
+                            "falling back to one flat message in chat %s: %s",
+                            auto_thread_root,
+                            chat_id,
+                            exc,
+                        )
+                        self._mark_auto_thread_failed(auto_thread_root)
+                        return await self._send_raw_message(
+                            chat_id=chat_id,
+                            msg_type=msg_type,
+                            payload=payload,
+                            reply_to=None,
+                            metadata=None,
+                        )
                     raise
                 wait_seconds = 2 ** attempt
                 logger.warning(

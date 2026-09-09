@@ -149,6 +149,12 @@ Intent: Resolve sender names through Contact v3 using event `open_id` before les
 Feature: Feishu delegate approval and clarification cards.
 Intent: Render remote A2A approval/clarify interactions with interactive cards, preserve chat/thread/authorization and duplicate-click checks, route choices and Other text through the remote responder, and accept either tenant-scoped callback `operator.user_id` or app-scoped `operator.open_id` when matching the stored source identity so legitimate delegate clicks are not rejected.
 
+Feature: Feishu automatic topic creation and root-keyed session routing.
+Intent: For top-level messages in regular groups and direct messages, use `FEISHU_REPLY_THREAD` (default `true`) to treat the `om_*` message ID as the prospective topic root and reply anchor, create the topic with `reply_in_thread=true`, and carry the root metadata through final, progress, approval, clarification, media, and error delivery. Reuse the root-keyed session when a later `omt_* + root_id` message has active or persisted routing, preserve existing forum and manually-created topic behavior, and perform at most one flat-message fallback when automatic topic creation fails.
+
+Feature: Feishu automatic-topic lifecycle boundaries.
+Intent: Keep AIAgent cache eviction independent from session continuity, while making the reset/prune boundary explicit: once an automatic root session has been ended by `session_reset` or its routing entry has been pruned after restart, a later topic message may create a new session and retain the real `omt_*` route rather than incorrectly binding an unknown human topic to the old root session. Keep this lifecycle behavior independent from the `FEISHU_REPLY_THREAD` topic-creation switch.
+
 ## File: `gateway/run.py`
 
 Feature: Delegate runtime binding per gateway turn.

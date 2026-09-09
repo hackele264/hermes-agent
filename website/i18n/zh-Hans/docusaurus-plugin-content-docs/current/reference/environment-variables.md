@@ -338,6 +338,7 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 | `FEISHU_ALLOWED_USERS` | 允许向 bot 发送消息的逗号分隔飞书用户 ID |
 | `FEISHU_ALLOW_BOTS` | `none`（默认）/`mentions`/`all`——接受来自其他 bot 的入站消息。参见 [bot 间消息传递](../user-guide/messaging/feishu.md#bot-to-bot-messaging) |
 | `FEISHU_REQUIRE_MENTION` | `true`（默认）/`false`——群组消息是否必须 @mention bot。可通过 `group_rules.<chat_id>.require_mention` 按聊天覆盖。 |
+| `FEISHU_REPLY_THREAD` | 为每条私聊或普通群顶层任务创建独立话题/session。默认 `true`；设为 `false` 时平铺回复。 |
 | `FEISHU_HOME_CHANNEL` | cron 投递和通知的飞书聊天 ID |
 | `WECOM_BOT_ID` | 来自管理控制台的企业微信 AI Bot ID |
 | `WECOM_SECRET` | 企业微信 AI Bot 密钥 |

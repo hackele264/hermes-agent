@@ -430,6 +430,7 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `FEISHU_ALLOWED_USERS` | Comma-separated Feishu user IDs allowed to message the bot |
 | `FEISHU_ALLOW_BOTS` | `none` (default) / `mentions` / `all` — accept inbound messages from other bots. See [bot-to-bot messaging](../user-guide/messaging/feishu.md#bot-to-bot-messaging) |
 | `FEISHU_REQUIRE_MENTION` | `true` (default) / `false` — whether group messages must @mention the bot. Override per-chat via `group_rules.<chat_id>.require_mention`. |
+| `FEISHU_REPLY_THREAD` | Create one topic/session for each top-level direct-message or regular-group task. Default: `true`; set `false` for flat replies. |
 | `FEISHU_HOME_CHANNEL` | Feishu chat ID for cron delivery and notifications |
 | `FEISHU_HOME_CHANNEL_NAME` | Display name for the Feishu home channel. |
 | `FEISHU_ALLOW_ALL_USERS` | Allow any Feishu user to trigger the bot (dev only). |

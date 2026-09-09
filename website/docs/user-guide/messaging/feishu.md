@@ -20,6 +20,7 @@ The integration supports both connection modes:
 | Direct messages | Hermes responds to every message. |
 | Group chats | Hermes responds only when the bot is @mentioned in the chat. |
 | Shared group chats | By default, session history is isolated per user inside a shared chat. |
+| Automatic topics | By default, each new direct-message or regular-group task is answered in its own topic and keeps one session there. |
 
 This shared-chat behavior is controlled by `config.yaml`:
 
@@ -28,6 +29,20 @@ group_sessions_per_user: true
 ```
 
 Set it to `false` only if you explicitly want one shared conversation per chat.
+
+### Automatic Topics
+
+Top-level messages in direct chats and regular groups create a Feishu topic on
+the first bot reply. Progress, prompts, media, and the final answer remain in
+that topic, and later topic replies continue the same Hermes session. Existing
+topics keep their normal routing; topic-mode groups are not changed.
+
+```bash
+FEISHU_REPLY_THREAD=true   # default
+FEISHU_REPLY_THREAD=false  # reply in the original chat instead
+```
+
+If topic creation fails, Hermes sends that output once as a normal chat message.
 
 ## Step 1: Create a Feishu / Lark App
 
@@ -554,6 +569,7 @@ Inbound messages are deduplicated using message IDs with a 24-hour TTL. The dedu
 | `FEISHU_ALLOWED_USERS` | — | _(empty)_ | Comma-separated open_id list for user allowlist |
 | `FEISHU_ALLOW_BOTS` | — | `none` | Accept messages from other bots: `none`, `mentions`, or `all` |
 | `FEISHU_REQUIRE_MENTION` | — | `true` | Whether group messages must @mention the bot |
+| `FEISHU_REPLY_THREAD` | — | `true` | Create a topic for each top-level DM or regular-group message; set `false` for flat replies |
 | `FEISHU_HOME_CHANNEL` | — | — | Chat ID for cron/notification output |
 | `FEISHU_ENCRYPT_KEY` | — | _(empty)_ | Encrypt key for webhook signature verification |
 | `FEISHU_VERIFICATION_TOKEN` | — | _(empty)_ | Verification token for webhook payload auth |
