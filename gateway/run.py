@@ -16441,32 +16441,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _safe_user_name = neutralize_untrusted_inline_text(source.user_name)
         else:
             _safe_user_name = None
-        if _is_shared_multi_user and source.user_name:
-            # On Slack, expose the current author's verifiable user ID next to
-            # the display name (#17916): "mention me again" requests need a
-            # trusted `<@U...>` target for the CURRENT speaker — display names
-            # are ambiguous and historical mentions may point at someone else.
-            # The user_id comes from the Slack event envelope (not
-            # user-editable text), so it does not need neutralization.
-            #
-            # This takes priority over the structured <source> header below:
-            # a shared multi-user session (e.g. a Slack thread with
-            # thread_sessions_per_user=False) needs the mention prefix on
-            # every message so participants can be told apart, whereas the
-            # <source> header is meant for the (typically per-user or DM)
-            # case where the A2A executor needs to recover sender identity
-            # without a chatty inline prefix polluting the conversation.
-            if source.platform == Platform.SLACK and source.user_id:
-                _safe_user_name = (
-                    f"{_safe_user_name} | Slack user <@{source.user_id}>"
-                )
-            message_text = f"[{_safe_user_name}] {message_text}"
-        elif _source_platform in {"slack", "feishu"} and source.user_id:
-            # Build a structured source header for Slack and Feishu messages,
-            # including DMs, so the A2A executor can recover sender and channel
-            # identity without altering command parsing upstream.
-            # It is applied after all other inbound context has been prepended,
-            # keeping it on the first line for the executor's parser.
+
+        # Slack and Feishu need the structured source header even when an
+        # automatic or existing topic makes the session shared across
+        # participants. Keep the human-readable sender prefix below as well:
+        # it is part of the shared-session attribution contract, while the
+        # structured header is consumed by the A2A/user-identity path.
+        if (
+            _source_platform in {"slack", "feishu"}
+            and source.user_id
+        ):
             import json as _json
 
             _source_data: dict = {"platform": _source_platform}
@@ -16483,6 +16467,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             _source_header = f"<source>{_json.dumps(_source_data, ensure_ascii=False, separators=(',', ':'))}</source>"
 
+        if _is_shared_multi_user and source.user_name:
+            # On Slack, expose the current author's verifiable user ID next to
+            # the display name (#17916): "mention me again" requests need a
+            # trusted `<@U...>` target for the CURRENT speaker — display names
+            # are ambiguous and historical mentions may point at someone else.
+            # The user_id comes from the Slack event envelope (not
+            # user-editable text), so it does not need neutralization.
+            #
+            # Slack's shared-session behavior keeps the mention prefix as the
+            # participant discriminator. Feishu retains that prefix and also
+            # carries the structured header built above so its source identity
+            # remains available in automatic and existing topics.
+            if source.platform == Platform.SLACK and source.user_id:
+                _safe_user_name = (
+                    f"{_safe_user_name} | Slack user <@{source.user_id}>"
+                )
+            message_text = f"[{_safe_user_name}] {message_text}"
         # Prepend channel context from history backfill (if any).  This
         # happens after sender-prefix so the prefix only applies to the
         # trigger message, not the backfill block.

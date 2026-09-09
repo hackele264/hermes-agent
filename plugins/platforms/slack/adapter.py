@@ -4447,6 +4447,20 @@ class SlackAdapter(BasePlatformAdapter):
 
     # ----- User identity resolution -----
 
+    @staticmethod
+    def _slack_response_data(response: Any) -> Optional[Dict[str, Any]]:
+        """Return the JSON payload from a dict or Slack SDK response.
+
+        ``slack_sdk`` returns ``SlackResponse`` objects, which expose the
+        response mapping through ``.data`` but are not themselves dicts.
+        Keeping this unwrapping in one place prevents identity lookups from
+        treating successful API responses as failures.
+        """
+        if isinstance(response, dict):
+            return response
+        data = getattr(response, "data", None)
+        return data if isinstance(data, dict) else None
+
     async def _resolve_user_name(
         self, user_id: str, chat_id: str = "", team_id: str = ""
     ) -> str:
@@ -4469,11 +4483,12 @@ class SlackAdapter(BasePlatformAdapter):
                 else self._app.client
             )
             result = await client.users_info(user=user_id)
-            if not isinstance(result, dict):
+            response_data = self._slack_response_data(result)
+            if response_data is None:
                 self._user_is_bot_cache[cache_key] = False
                 self._user_name_cache[cache_key] = user_id
                 return user_id
-            user = result.get("user", {})
+            user = response_data.get("user", {})
             profile = user.get("profile", {}) if isinstance(user, dict) else {}
             self._user_is_bot_cache[cache_key] = bool(
                 user.get("is_bot")
@@ -4649,11 +4664,11 @@ class SlackAdapter(BasePlatformAdapter):
                 else self._app.client
             )
             result = await client.users_info(user=user_id)
-            if not isinstance(result, dict):
+            response_data = self._slack_response_data(result)
+            if response_data is None:
                 self._user_is_bot_cache[cache_key] = False
-                self._user_name_cache.setdefault(cache_key, user_id)
                 return False
-            user = result.get("user", {})
+            user = response_data.get("user", {})
             profile = user.get("profile", {}) if isinstance(user, dict) else {}
             is_bot = bool(
                 user.get("is_bot")

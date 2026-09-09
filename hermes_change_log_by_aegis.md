@@ -117,6 +117,9 @@ Intent: Capture follow-up messages for active delegate loops before normal messa
 Feature: Slack slash-command source identity.
 Intent: Preserve the invoking Slack display name when constructing slash-command events, including legacy `/hermes` free-form turns, so downstream source envelopes retain the same user identity fields as normal Slack messages.
 
+Feature: Slack SDK user display-name resolution.
+Intent: Unwrap SlackResponse API payloads when resolving human display names and bot status so SessionSource.user_name carries the display name instead of the member ID; avoid poisoning the shared name cache when a bot probe receives an invalid response.
+
 Feature: Slack bot-message source identity fallback.
 Intent: Preserve `bot_id` as the sender identity when a Slack `bot_message` event omits `user`, propagate the bot marker through authorization and `SessionSource`, and use event-provided bot names without passing a bot ID to the user lookup API so `<source>` attribution remains available for peer-bot mentions.
 
@@ -161,7 +164,7 @@ Feature: Delegate runtime binding per gateway turn.
 Intent: Bind adapter-provided delegate output and input factories onto both fresh and cached agents each turn, preventing Slack thread/user runtime state from leaking across cached sessions.
 
 Feature: Slack / Feishu source identity envelope for agent-bound messages.
-Intent: Prefix Slack and Feishu DM/channel/group messages that become agent-bound turns with compact structured metadata after gateway command handling and all inbound-context assembly, mapping Feishu `chat_id` to the shared `channel` field and keeping the user ID and optional display name on the first line without affecting command parsing or other-platform attribution. This main-Agent envelope is intentionally distinct from the remote A2A envelope, which carries only parent platform/user identity and does not automatically receive the channel.
+Intent: Prefix Slack and Feishu DM/channel/group messages that become agent-bound turns with compact structured metadata after gateway command handling and all inbound-context assembly, including Slack shared channels and threads whenever a trusted user ID is available. Map Feishu `chat_id` to the shared `channel` field, keep the user ID and optional display name on the first line, preserve Slack's human-readable shared-session participant prefix, and avoid affecting command parsing or other-platform attribution. This main-Agent envelope is intentionally distinct from the remote A2A envelope, which carries only parent platform/user identity and does not automatically receive the channel.
 
 
 ## File: `tools/user_env_store.py`

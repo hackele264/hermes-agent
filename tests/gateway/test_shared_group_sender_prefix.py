@@ -16,7 +16,10 @@ def _make_runner(config: GatewayConfig) -> GatewayRunner:
 
 
 @pytest.mark.asyncio
-async def test_preprocess_includes_slack_author_mention_for_shared_thread():
+@pytest.mark.parametrize("thread_id", ["171.000", "170.000"])
+async def test_preprocess_includes_slack_source_and_author_mention_for_shared_thread(
+    thread_id: str,
+):
     """Shared Slack threads expose the current author's verifiable user ID
     next to the display name so 'mention me again' requests can bind the
     mention to the CURRENT speaker (#17916)."""
@@ -34,7 +37,7 @@ async def test_preprocess_includes_slack_author_mention_for_shared_thread():
         chat_type="group",
         user_id="U123",
         user_name="Alice",
-        thread_id="171.000",
+        thread_id=thread_id,
     )
     event = MessageEvent(text="mention me again", source=source)
 
@@ -44,7 +47,32 @@ async def test_preprocess_includes_slack_author_mention_for_shared_thread():
         history=[],
     )
 
-    assert result == "[Alice | Slack user <@U123>] mention me again"
+    assert result == (
+        '<source>{"platform":"slack","channel":"C123",'
+        '"uid":"U123","uname":"Alice"}</source>\n\n'
+        "[Alice | Slack user <@U123>] mention me again"
+    )
+
+
+@pytest.mark.asyncio
+async def test_preprocess_does_not_build_slack_source_without_user_id():
+    runner = _make_runner(GatewayConfig())
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="group",
+        user_name="Alice",
+        thread_id="171.000",
+    )
+    event = MessageEvent(text="hello", source=source)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result == "[Alice] hello"
 
 
 @pytest.mark.asyncio
@@ -159,6 +187,34 @@ async def test_preprocess_keeps_feishu_source_prefix_before_thread_reply_context
         '<source>{"platform":"feishu","channel":"oc_feishu",'
         '"uid":"ou_user","uname":"Ada"}</source>\n\n'
         '[Replying to: "上一条消息"]\n\n继续处理'
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", ["om_auto_root", "omt_existing"])
+async def test_preprocess_adds_feishu_source_prefix_to_shared_threads(thread_id: str):
+    """Feishu thread routing must not suppress the structured source header."""
+    runner = _make_runner(GatewayConfig())
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        chat_id="oc_feishu",
+        chat_type="group",
+        user_id="ou_user",
+        user_name="Alice",
+        thread_id=thread_id,
+    )
+    event = MessageEvent(text="hello", source=source)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result == (
+        '<source>{"platform":"feishu","channel":"oc_feishu",'
+        '"uid":"ou_user","uname":"Alice"}</source>\n\n'
+        '[Alice] hello'
     )
 
 
