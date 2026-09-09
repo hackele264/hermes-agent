@@ -149,7 +149,7 @@ def on_pre_tool_call(tool_name="", args=None, session_id="", turn_id="", **kwarg
 
     # Non-admin dangerous operations still require human approval.
     dangerous = _looks_dangerous(tool_name, args or {})
-    if dangerous and role_name in roles.PERSISTED_ROLES and role_name != "admin":
+    if dangerous and role_name in roles.PERSISTED_ROLES:
         roles.audit("escalate_approval", identity=roles.identity_key(plat, uid),
                     role=role_name, tool=tool_name)
         return {
@@ -160,17 +160,10 @@ def on_pre_tool_call(tool_name="", args=None, session_id="", turn_id="", **kwarg
     return None  # 放行
 
 
-_DANGEROUS_PAT = re.compile(
-    r"(rm\s+-rf|git\s+push|drop\s+(table|database)|shutdown|reboot|mkfs|:\(\)\{)", re.I
-)
-
-
 def _looks_dangerous(tool_name: str, args: dict) -> bool:
     if tool_name in ("terminal", "execute_code", "computer_use"):
         blob = json.dumps(args, ensure_ascii=False)
-        return bool(_DANGEROUS_PAT.search(blob))
-    if tool_name.startswith(("github_", "publish", "send_", "broadcast")):
-        return True
+        return bool(roles.DANGEROUS_PATTERN.search(blob))
     return False
 
 
@@ -198,6 +191,7 @@ def _tool_rbac_status(params, **kwargs):
         "allow_tools": r["allow_tools"] if r["allow_tools"] is not None else "all (deny-list mode)",
         "denied_tools": sorted(r.get("denied_tools", [])),
         "tools_paras": r.get("tools_paras", {}),
+        "dangerous_pattern": roles.DANGEROUS_PATTERN.pattern,
         "known_roles": list(roles.PERSISTED_ROLES),
     }, ensure_ascii=False)
 

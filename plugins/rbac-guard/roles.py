@@ -37,13 +37,9 @@ CREATE TABLE IF NOT EXISTS user_roles (
 _ROLE_DB_PATH = Path(
     os.environ.get("AEGIS_DB_PATH", str(get_hermes_home() / "aegis.db"))
 )
-_AUDIT_PATH = Path(
-    os.environ.get(
-        "HERMES_RBAC_AUDIT",
-        str(Path(__file__).parent / "data" / "audit.log"),
-    )
-)
-_AUDIT_ENABLED_ENV = "AEGIS_RBAC_AUDIT"
+_AUDIT_PATH = Path(str(Path(__file__).parent / "data" / "audit.log"))
+
+_AUDIT_ENABLED = (os.environ.get("AEGIS_RBAC_AUDIT") or "").strip().lower() == "true"
 
 _audit_lock = threading.Lock()
 _role_db_lock = threading.RLock()
@@ -53,6 +49,7 @@ PERSISTED_ROLES = ("user", "operator", "admin")
 _ROLE_RULE_FIELDS = frozenset(
     {"summary", "prompt_constraints", "allow_tools", "denied_tools", "tools_paras"}
 )
+_DANGEROUS_PATTERN_FIELD = "dangerous_pattern"
 _ROLE_RULES_ENV = "AEGIS_RBAC_RULES_PATH"
 _LEGACY_UNKNOWN_ROLE = "unknown"
 
@@ -74,23 +71,37 @@ class RoleRulesConfigError(ValueError):
     """Raised when the plugin's role_rules.json is missing or invalid."""
 
 
-def _load_role_rules(path: Path | None = None) -> dict[str, dict]:
+def _load_role_rules_config(path: Path | None = None) -> tuple[dict[str, dict], re.Pattern[str]]:
     path = (path or _resolve_role_rules_path()).resolve()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RoleRulesConfigError(f"Unable to load {path.name}: {exc}") from exc
     if not isinstance(payload, dict):
-        raise RoleRulesConfigError(f"{path.name} must define exactly: {', '.join(PERSISTED_ROLES)}")
+        raise RoleRulesConfigError(f"{path.name} must be a JSON object")
     configured_roles = set(payload)
     expected_roles = set(PERSISTED_ROLES)
-    migrated = configured_roles == expected_roles | {_LEGACY_UNKNOWN_ROLE}
+    expected_fields = expected_roles | {_DANGEROUS_PATTERN_FIELD}
+    migrated = configured_roles == expected_fields | {_LEGACY_UNKNOWN_ROLE}
     if migrated:
         payload.pop(_LEGACY_UNKNOWN_ROLE)
-    elif configured_roles != expected_roles:
+    elif configured_roles != expected_fields:
         raise RoleRulesConfigError(
-            f"{path.name} must define exactly: {', '.join(PERSISTED_ROLES)}"
+            f"{path.name} must define exactly: {', '.join(PERSISTED_ROLES)}, "
+            f"{_DANGEROUS_PATTERN_FIELD}"
         )
+
+    dangerous_pattern = payload[_DANGEROUS_PATTERN_FIELD]
+    if not isinstance(dangerous_pattern, str):
+        raise RoleRulesConfigError(
+            f"{_DANGEROUS_PATTERN_FIELD} must be a regular expression string"
+        )
+    try:
+        compiled_dangerous_pattern = re.compile(dangerous_pattern, re.I)
+    except re.error as exc:
+        raise RoleRulesConfigError(
+            f"Invalid regex for {_DANGEROUS_PATTERN_FIELD}: {exc}"
+        ) from exc
 
     validated: dict[str, dict] = {}
     for role_name in PERSISTED_ROLES:
@@ -159,11 +170,19 @@ def _load_role_rules(path: Path | None = None) -> dict[str, dict]:
             },
         }
     if migrated:
-        _write_role_rules_atomically(path, validated)
-    return validated
+        _write_role_rules_atomically(
+            path,
+            {_DANGEROUS_PATTERN_FIELD: dangerous_pattern, **validated},
+        )
+    return validated, compiled_dangerous_pattern
 
 
-def _write_role_rules_atomically(path: Path, payload: dict[str, dict]) -> None:
+def _load_role_rules(path: Path | None = None) -> dict[str, dict]:
+    """Load and validate the role-specific section of role_rules.json."""
+    return _load_role_rules_config(path)[0]
+
+
+def _write_role_rules_atomically(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
@@ -186,7 +205,7 @@ def _write_role_rules_atomically(path: Path, payload: dict[str, dict]) -> None:
 
 
 # Loaded once at plugin import/startup. User role assignments remain dynamic in SQLite.
-ROLE_RULES = _load_role_rules()
+ROLE_RULES, DANGEROUS_PATTERN = _load_role_rules_config()
 
 
 # ------------------------------------------------------------------ 工具函数 ----
@@ -246,7 +265,7 @@ def _role_record(platform: str, user_id: str) -> sqlite3.Row | None:
 
 def audit(event: str, **fields) -> None:
     """追加审计日志（JSONL）。这是安全事件的唯一事实来源。"""
-    if (os.environ.get(_AUDIT_ENABLED_ENV) or "").strip().lower() != "true":
+    if not _AUDIT_ENABLED:
         return
     try:
         with _audit_lock:

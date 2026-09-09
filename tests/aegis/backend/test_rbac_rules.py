@@ -14,10 +14,11 @@ RULE_FIELDS = {
     "denied_tools": [],
     "tools_paras": {"terminal": {"command": "^ls(\\s|$)"}},
 }
+DANGEROUS_PATTERN = r"(rm\s+-rf|git\s+push|drop\s+(table|database)|shutdown|reboot|mkfs|:\(\)\{)"
 
 
-def _rules_payload() -> dict[str, dict[str, object]]:
-    return {
+def _rules_payload() -> dict[str, object]:
+    rules = {
         role: {
             **RULE_FIELDS,
             "summary": f"{role} summary",
@@ -26,6 +27,7 @@ def _rules_payload() -> dict[str, dict[str, object]]:
         }
         for role in ("admin", "operator", "user")
     }
+    return {"dangerous_pattern": DANGEROUS_PATTERN, **rules}
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +87,7 @@ def test_admin_can_read_and_update_one_role_without_overwriting_the_others(
     persisted = json.loads(configured_rules_file.read_text(encoding="utf-8"))
     assert persisted["user"] == updated_rule
     assert persisted["admin"] == _rules_payload()["admin"]
+    assert persisted["dangerous_pattern"] == DANGEROUS_PATTERN
 
 
 def test_rule_validation_rejects_unknown_missing_and_invalid_values(
@@ -106,6 +109,22 @@ def test_rule_validation_rejects_unknown_missing_and_invalid_values(
     assert client.put("/api/rbac-rules/unknown", headers=auth_headers, json=RULE_FIELDS).status_code == 422
 
 
+def test_rule_file_rejects_missing_or_invalid_dangerous_pattern(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    configured_rules_file: Path,
+) -> None:
+    missing = _rules_payload()
+    missing.pop("dangerous_pattern")
+    configured_rules_file.write_text(json.dumps(missing), encoding="utf-8")
+    assert client.get("/api/rbac-rules", headers=auth_headers).status_code == 422
+
+    invalid = _rules_payload()
+    invalid["dangerous_pattern"] = "["
+    configured_rules_file.write_text(json.dumps(invalid), encoding="utf-8")
+    assert client.get("/api/rbac-rules", headers=auth_headers).status_code == 422
+
+
 def test_legacy_unknown_role_is_removed_and_persisted_atomically(tmp_path: Path) -> None:
     from aegis.backend.services.rbac_rule_service import RbacRuleService
 
@@ -124,7 +143,12 @@ def test_legacy_unknown_role_is_removed_and_persisted_atomically(tmp_path: Path)
 
     assert set(rules) == {"admin", "operator", "user"}
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert set(persisted) == {"admin", "operator", "user"}
+    assert set(persisted) == {
+        "admin",
+        "operator",
+        "user",
+        "dangerous_pattern",
+    }
     assert persisted["user"] == legacy_rules["user"]
 
 

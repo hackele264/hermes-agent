@@ -41,7 +41,7 @@ Hermes core: resolve_pre_tool_block()
 
 - `plugin.yaml` — manifest
 - `__init__.py` — hooks + 管理工具注册
-- `role_rules.json` — 角色规则配置（prompt 约束、工具白名单/黑名单、参数正则约束）
+- `role_rules.json` — 角色规则配置（危险命令正则、prompt 约束、工具白名单/黑名单、参数正则约束）
 - `roles.py` — 数据库身份映射、配置加载校验、权限判定与审计日志
 - `<HERMES_HOME>/aegis.db:user_roles` — 运行期角色表，Users 页面修改后下一次判定立即生效
 - `data/audit.log` — JSONL 审计：context_injected / tool_blocked / escalate_approval / role_set / tool_executed；默认关闭，仅 `AEGIS_RBAC_AUDIT=true` 时输出
@@ -56,6 +56,19 @@ Hermes core: resolve_pre_tool_block()
 
 未登记用户，以及数据库中出现无法识别角色的用户，统一按 `user` 角色处理，
 使用 `user` 的完整规则，不再存在独立的 `unknown` 角色。
+
+顶层 `dangerous_pattern` 是用于审批升级的大小写不敏感正则。它匹配
+`terminal`、`execute_code` 和 `computer_use` 的调用参数；`user` 与 `operator`
+命中后会进入人工审批。修改该字段无需改代码，重启 Hermes 后会加载新的配置。
+
+```json
+{
+  "dangerous_pattern": "(rm\\s+-rf|git\\s+push|shutdown|reboot)",
+  "admin": { "...": "..." },
+  "operator": { "...": "..." },
+  "user": { "...": "..." }
+}
+```
 
 `tools_paras` 使用按工具和参数名分组的正则规则。工具被列出后，所有参数
 都必须存在且通过 `re.search` 包含匹配；未配置参数规则的工具不增加限制。

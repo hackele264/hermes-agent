@@ -22,6 +22,7 @@ _LEGACY_UNKNOWN_ROLE = "unknown"
 RBAC_RULE_FIELDS = frozenset(
     {"summary", "prompt_constraints", "allow_tools", "denied_tools", "tools_paras"}
 )
+DANGEROUS_PATTERN_FIELD = "dangerous_pattern"
 _RULES_LOCK = threading.RLock()
 
 
@@ -91,11 +92,21 @@ class RbacRuleService:
             raise RbacRuleConfigError("RBAC rules must be a JSON object.")
         expected_roles = set(RBAC_ROLES)
         configured_roles = set(payload)
-        if configured_roles == expected_roles | {_LEGACY_UNKNOWN_ROLE}:
+        expected_fields = expected_roles | {DANGEROUS_PATTERN_FIELD}
+        if configured_roles == expected_fields | {_LEGACY_UNKNOWN_ROLE}:
             payload.pop(_LEGACY_UNKNOWN_ROLE)
             return payload, True
-        if configured_roles != expected_roles:
-            raise RbacRuleConfigError("RBAC rules must define exactly the three supported roles.")
+        if configured_roles != expected_fields:
+            raise RbacRuleConfigError(
+                "RBAC rules must define the three supported roles and dangerous_pattern."
+            )
+        dangerous_pattern = payload[DANGEROUS_PATTERN_FIELD]
+        if not isinstance(dangerous_pattern, str):
+            raise RbacRuleConfigError("RBAC dangerous_pattern must be a string.")
+        try:
+            re.compile(dangerous_pattern)
+        except re.error as exc:
+            raise RbacRuleConfigError("RBAC dangerous_pattern is not a valid regular expression.") from exc
         return payload, False
 
     def _validated_rules(self, raw_rules: dict[str, Any]) -> dict[RbacRuleRole, RbacRule]:

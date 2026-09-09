@@ -58,11 +58,35 @@ def test_role_rules_are_loaded_from_json_without_rank(
             "tools_paras",
         }
 
+    assert rbac_roles.DANGEROUS_PATTERN.pattern == (
+        r"(rm\s+-rf|git\s+push|drop\s+(table|database)|shutdown|reboot|mkfs|:\(\)\{)"
+    )
     assert rbac_roles.set_role("feishu", "u-3", "user") is True
     prompt = rbac_roles.prompt_block("feishu", "u-3")
     assert "rank" not in prompt
     assert "tools_paras" not in prompt
     assert "工具参数约束" not in prompt
+
+
+def test_dangerous_pattern_is_loaded_from_the_role_rules_root(
+    rbac_roles: ModuleType,
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(rbac_roles._ROLE_RULES_PATH.read_text(encoding="utf-8"))
+    payload["dangerous_pattern"] = r"erase_everything"
+    path = tmp_path / "custom-role-rules.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rules, dangerous_pattern = rbac_roles._load_role_rules_config(path)
+
+    assert set(rules) == {"admin", "operator", "user"}
+    assert dangerous_pattern.search("please erase_everything now")
+    assert not dangerous_pattern.search("rm -rf /tmp")
+
+    payload["dangerous_pattern"] = "["
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(rbac_roles.RoleRulesConfigError, match="dangerous_pattern"):
+        rbac_roles._load_role_rules_config(path)
 
 
 def test_invalid_role_rules_config_fails_validation(
@@ -112,7 +136,12 @@ def test_legacy_unknown_role_is_removed_from_plugin_config(
 
     assert set(loaded) == {"admin", "operator", "user"}
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert set(persisted) == {"admin", "operator", "user"}
+    assert set(persisted) == {
+        "admin",
+        "operator",
+        "user",
+        "dangerous_pattern",
+    }
 
 
 def test_tools_paras_requires_every_configured_parameter_to_match(
@@ -241,6 +270,7 @@ def test_plugin_hook_enforces_parameter_rules_and_status_has_no_rank(
         status = json.loads(plugin._tool_rbac_status({"platform": "cli", "user_id": "u-4"}))
         assert "rank" not in status
         assert status["tools_paras"] == {"read_file": {"path": r"^/safe"}}
+        assert status["dangerous_pattern"] == plugin.roles.DANGEROUS_PATTERN.pattern
     finally:
         plugin.roles.close_role_db()
         sys.modules.pop(module_name, None)
