@@ -12,8 +12,9 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-REPO = Path("/Users/guisheng.guo/.hermes/hermes-agent")
-sys.path.insert(0, str(REPO))
+import pytest
+
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "plugins" / "ext-tools"))
 
 import cron_prompt as cp  # noqa: E402
@@ -54,44 +55,43 @@ def ident(platform, uid):
                            user_key=f"{platform}.{uid}")
 
 
-def run(label, ref, identity):
+def run(ref, identity):
     with mock.patch.object(cp, "resolve_job_ref", fake_resolve), \
          mock.patch.object(cp, "_current_identity", lambda: identity):
-        out = json.loads(cp.cron_prompt(job_id=ref))
-    status = "PASS" if out.get("success") == expected[label] else "**FAIL**"
-    print(f"[{status}] {label}: {json.dumps(out, ensure_ascii=False)[:160]}")
-    return out
+        return json.loads(cp.cron_prompt(job_id=ref))
 
 
-expected = {
-    "1-no-identify→放行": True,
-    "2-owner匹配→放行": True,
-    "3-owner不匹配→拒绝": False,
-    "3b-admin身份不豁免→拒绝": False,
-    "4a-不存在": False,
-    "4b-重名": False,
-    "5-无身份读owned→拒绝": False,
-}
+def test_no_identify_returns_full_prompt():
+    out = run("aaa1", ident("feishu", "anyone"))
+    assert out["success"] is True
+    assert out["prompt"] == "P-NO-OWNER" and out["owner"] is None
 
-results = {}
-results["1-no-identify→放行"] = run("1-no-identify→放行", "aaa1", ident("feishu", "anyone"))
-results["2-owner匹配→放行"] = run("2-owner匹配→放行", "bbb2", ident("slack", "U1"))
-results["3-owner不匹配→拒绝"] = run("3-owner不匹配→拒绝", "bbb2", ident("feishu", "bcge9g7d"))
-results["3b-admin身份不豁免→拒绝"] = run("3b-admin身份不豁免→拒绝", "bbb2", ident("feishu", "bcge9g7d"))
-results["4a-不存在"] = run("4a-不存在", "zzz", None)
-results["4b-重名"] = run("4b-重名", "dup", None)
-results["5-无身份读owned→拒绝"] = run("5-无身份读owned→拒绝", "bbb2", None)
 
-# 断言细节
-r1 = results["1-no-identify→放行"]
-assert r1["prompt"] == "P-NO-OWNER" and r1["owner"] is None, "用例1 prompt 全文未返回"
-r2 = results["2-owner匹配→放行"]
-assert r2["prompt"] == "P-SECRET" and r2["owner"] == "slack:U1", "用例2 owner 匹配未放行"
-r3 = results["3-owner不匹配→拒绝"]
-assert "P-SECRET" not in json.dumps(r3) and r3.get("error", "").startswith("permission denied"), "用例3 泄漏了 prompt 或错误信息不对"
-assert "ambiguous" in results["4b-重名"]["error"], "用例4b 未报重名"
-assert results["5-无身份读owned→拒绝"]["success"] is False
+def test_matching_owner_allowed():
+    out = run("bbb2", ident("slack", "U1"))
+    assert out["success"] is True
+    assert out["prompt"] == "P-SECRET" and out["owner"] == "slack:U1"
 
-ok = all(results[k]["success"] == expected[k] for k in expected)
-print("\n===", "ALL PASS" if ok else "SOME FAILED", "===")
-sys.exit(0 if ok else 1)
+
+@pytest.mark.parametrize("uid", ["bcge9g7d", "admin"])
+def test_other_caller_denied_even_if_admin(uid):
+    out = run("bbb2", ident("feishu", uid))
+    assert out["success"] is False
+    assert "P-SECRET" not in json.dumps(out)
+    assert out.get("error", "").startswith("permission denied")
+
+
+def test_missing_job():
+    assert run("zzz", None)["success"] is False
+
+
+def test_duplicate_name_is_ambiguous():
+    out = run("dup", None)
+    assert out["success"] is False
+    assert "ambiguous" in out["error"]
+
+
+def test_no_identity_denied_for_owned_job():
+    out = run("bbb2", None)
+    assert out["success"] is False
+    assert "P-SECRET" not in json.dumps(out)
