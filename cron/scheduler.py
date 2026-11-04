@@ -1337,12 +1337,16 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
 
         if (
             thread_id is None
-            and platform_key == "slack"
+            and platform_key in ("slack", "feishu")
             and origin
             and str(origin.get("platform") or "").lower() == platform_key
             and str(origin.get("chat_id")) == str(chat_id)
             and origin.get("thread_id")
         ):
+            # Slack (forum threads) and Feishu (topic threads, omt_*) both key
+            # their threads per chat: when an explicit deliver target points at
+            # the SAME chat the job was created in, the origin thread is the
+            # conversation the user expects the output in.
             thread_id = origin.get("thread_id")
 
         return {
@@ -1697,7 +1701,15 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         # Diagnostic: log thread_id for topic-aware delivery debugging
         origin = _resolve_origin(job) or {}
         origin_thread = origin.get("thread_id")
-        if origin_thread and not thread_id:
+        same_chat_as_origin = (
+            str(origin.get("platform") or "").lower() == str(platform_name).lower()
+            and str(origin.get("chat_id") or "") == str(chat_id)
+        )
+        if origin_thread and not thread_id and same_chat_as_origin:
+            # Only warn when the target IS the origin conversation: a fan-out /
+            # explicit deliver to a different chat legitimately has no thread,
+            # and warning there is a false positive (e.g. job 3c3f6af64b89
+            # delivering to a different Feishu chat than its origin).
             logger.warning(
                 "Job '%s': origin has thread_id=%s but delivery target lost it "
                 "(deliver=%s, target=%s)",
@@ -2065,8 +2077,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                             elif (
                                 send_raw_response
                                 and thread_id
+                                and isinstance(send_raw_response, dict)
                                 and send_raw_response.get("thread_fallback")
                             ):
+                                # Only adapters that report thread fallbacks as a
+                                # plain dict (e.g. Telegram) carry the
+                                # "thread_fallback" marker. Other platforms return
+                                # the raw SDK response object (e.g. Feishu's
+                                # ReplyMessageResponse) which has no .get —
+                                # inspecting it crashed the post-send bookkeeping
+                                # AFTER the message was already sent, and the
+                                # outer except then re-sent it standalone
+                                # (duplicate delivery). Non-dict responses simply
+                                # have no fallback marker to read.
                                 requested_thread_id = send_raw_response.get("requested_thread_id") or thread_id
                                 msg = (
                                     f"configured thread_id {requested_thread_id} for "

@@ -441,6 +441,172 @@ class TestDeliverResultErrorReturns:
         assert "not configured" in result
 
 
+class _FakeSdkResponse:
+    """Stands in for a lark/oapi SDK response object (e.g. Feishu's
+    ReplyMessageResponse): an object with attributes but NO .get — the exact
+    shape that crashed the post-send thread-fallback bookkeeping."""
+
+
+class TestLiveAdapterNonDictRawResponse:
+    """Bug: for Feishu, SendResult.raw_response is the raw lark SDK object
+    (ReplyMessageResponse), not a dict. When the target has a thread_id, the
+    scheduler's post-send inspection called .get("thread_fallback") on it —
+    AttributeError AFTER the live adapter had already delivered, and the outer
+    except then re-sent the message standalone (duplicate delivery)."""
+
+    def _run_delivery(self, raw_response, caplog=None):
+        """Drive _deliver_result through a live adapter whose SendResult carries
+        the given raw_response, with a thread_id target. Returns the standalone
+        send mock so callers can assert it was NOT used."""
+        import asyncio
+        from concurrent.futures import Future
+        from gateway.config import Platform
+        from gateway.platforms.base import SendResult
+
+        adapter = AsyncMock()
+        adapter.send.return_value = SendResult(
+            success=True, message_id="om_1", raw_response=raw_response,
+        )
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        def fake_run_coro(coro, _loop):
+            future = Future()
+            try:
+                future.set_result(asyncio.run(coro))
+            except BaseException as e:  # noqa: BLE001
+                future.set_exception(e)
+            return future
+
+        job = {
+            "id": "feishu-thread-job",
+            "deliver": "feishu:oc_123:omt_456",
+            "origin": {"platform": "feishu", "chat_id": "oc_123"},
+        }
+
+        standalone_send = AsyncMock()
+
+        ctx = [
+            patch("gateway.config.load_gateway_config", return_value=mock_cfg),
+            patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+            patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro),
+            patch("tools.send_message_tool._send_to_platform", new=standalone_send),
+        ]
+        if caplog is not None:
+            ctx.insert(0, caplog.at_level(logging.WARNING, logger="cron.scheduler"))
+        with contextlib.ExitStack() as stack:
+            for c in ctx:
+                stack.enter_context(c)
+            result = _deliver_result(
+                job, "threaded output",
+                adapters={Platform.FEISHU: adapter},
+                loop=loop,
+            )
+        return result, adapter, standalone_send
+
+    def test_non_dict_raw_response_with_thread_id_no_crash_no_duplicate(self, caplog):
+        """SDK-object raw_response + thread_id: no exception, adapter delivered,
+        and NO standalone resend (previously: AttributeError -> duplicate send)."""
+        result, adapter, standalone_send = self._run_delivery(
+            _FakeSdkResponse(), caplog=caplog,
+        )
+        assert adapter.send.await_count >= 1
+        standalone_send.assert_not_awaited()
+        # No 'falling back to standalone' warning for this target
+        warnings = [
+            r for r in caplog.records
+            if "falling back to standalone" in r.getMessage()
+        ]
+        assert not warnings
+
+    def test_dict_raw_response_with_thread_fallback_still_warned(self, caplog):
+        """Contract preserved: a dict raw_response WITH the thread_fallback
+        marker still produces the thread-fallback warning (Telegram path)."""
+        result, adapter, standalone_send = self._run_delivery(
+            {"thread_fallback": True, "requested_thread_id": "omt_456"}, caplog=caplog,
+        )
+        standalone_send.assert_not_awaited()
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("was not found; delivered without thread_id" in m for m in msgs)
+
+    def test_dict_raw_response_without_fallback_marker_silent(self, caplog):
+        """A dict raw_response WITHOUT the marker stays silent — no regression
+        for adapters that return dicts but never fall back."""
+        result, adapter, standalone_send = self._run_delivery(
+            {"message_id": "om_9"}, caplog=caplog,
+        )
+        standalone_send.assert_not_awaited()
+        msgs = [r.getMessage() for r in caplog.records]
+        assert not any("thread" in m.lower() for m in msgs)
+
+
+class TestFeishuThreadIdInheritance:
+    """Bug 2: an explicit deliver target on Feishu pointing at the SAME chat as
+    the job origin never inherited the origin thread_id (only Slack did), and
+    the diagnostic warned 'origin has thread_id ... lost it' even when the
+    target was a DIFFERENT chat (false positive)."""
+
+    def test_explicit_feishu_target_same_chat_inherits_origin_thread(self):
+        job = {
+            "deliver": "feishu:oc_abc",
+            "origin": {
+                "platform": "feishu",
+                "chat_id": "oc_abc",
+                "thread_id": "omt_111",
+            },
+        }
+        with patch(
+            "gateway.channel_directory.resolve_channel_name", return_value=None,
+        ):
+            assert _resolve_delivery_target(job) == {
+                "platform": "feishu",
+                "chat_id": "oc_abc",
+                "thread_id": "omt_111",
+            }
+
+    def test_explicit_feishu_target_different_chat_no_inheritance(self):
+        job = {
+            "deliver": "feishu:oc_other",
+            "origin": {
+                "platform": "feishu",
+                "chat_id": "oc_abc",
+                "thread_id": "omt_111",
+            },
+        }
+        with patch(
+            "gateway.channel_directory.resolve_channel_name", return_value=None,
+        ):
+            assert _resolve_delivery_target(job) == {
+                "platform": "feishu",
+                "chat_id": "oc_other",
+                "thread_id": None,
+            }
+
+    def test_slack_same_chat_inheritance_unchanged(self):
+        job = {
+            "deliver": "slack:C123",
+            "origin": {
+                "platform": "slack",
+                "chat_id": "C123",
+                "thread_id": "1699",
+            },
+        }
+        with patch(
+            "gateway.channel_directory.resolve_channel_name", return_value=None,
+        ):
+            assert _resolve_delivery_target(job) == {
+                "platform": "slack",
+                "chat_id": "C123",
+                "thread_id": "1699",
+            }
+
+
 class TestRunJobSessionPersistence:
     def test_run_job_passes_session_db_and_cron_platform(self, tmp_path):
         job = {
