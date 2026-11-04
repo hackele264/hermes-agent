@@ -147,6 +147,51 @@ def test_native_image_keeps_image_parts():
     assert session.inputs == [[{"type": "text", "text": "这张图"}, image], [image]]
 
 
+def test_codex_echo_of_raw_text_is_dropped():
+    from agent.codex_runtime import _drop_turn_input_echo
+    from agent.transports.codex_app_server_session import TurnResult
+
+    class EchoingSession:
+        """codex 把 turn/start 的输入作为 userMessage 回显，后面跟回合中的 steer。"""
+
+        def run_turn(self, user_input, *, turn_timeout=600.0):
+            result = TurnResult()
+            result.projected_messages = [
+                {"role": "user", "content": user_input},
+                {"role": "user", "content": "steer text"},
+                {"role": "assistant", "content": "done"},
+            ]
+            return result
+
+    runner, session = _runner(), EchoingSession()
+    raw_prompt.install_session_passthrough(session)
+    raw_prompt.install_gateway_capture(runner)
+    seen = {}
+
+    async def turn():
+        prepared = await runner._prepare_profile_scoped_inbound_message_text(
+            event=_event("改一下 README"), source=_source(), history=[], session_key="k"
+        )
+        loop = asyncio.get_running_loop()
+        seen["prepared"] = prepared
+        seen["result"] = await loop.run_in_executor(
+            None, contextvars.copy_context().run, lambda: session.run_turn(user_input=prepared)
+        )
+
+    asyncio.run(turn())
+
+    expected = [{"role": "user", "content": "steer text"}, {"role": "assistant", "content": "done"}]
+    assert seen["result"].projected_messages == expected
+    # core 随后按加工后的输入去重：对不上，steer 保留
+    assert _drop_turn_input_echo(seen["result"].projected_messages, seen["prepared"]) == expected
+
+    # 没有替换（CLI）：回显留给 core 去重
+    cli = EchoingSession()
+    raw_prompt.install_session_passthrough(cli)
+    raw_prompt._inbound.set(None)
+    assert cli.run_turn(user_input="cli text").projected_messages[0] == {"role": "user", "content": "cli text"}
+
+
 def test_queued_followup_gets_its_own_text_once():
     runner, session = _runner(), _session()
     raw_prompt.install_gateway_capture(runner)

@@ -10,7 +10,7 @@
     本轮那条消息。
   - 替换：给会话后端包一层 ``run_turn``：本轮输入确实由那条加工结果而来时才替换——纯文本消息换成
     ``event.text`` 原文；带附件的消息保留附件说明，剥掉网关加的其他内容。每条消息只替换一次；
-    CLI / TUI 没有记录，原样透传。
+    CLI / TUI 没有记录，原样透传。codex 回显的那条原文用户消息随之去掉（core 按加工后的输入去重，对不上）。
 """
 
 from __future__ import annotations
@@ -74,10 +74,30 @@ def install_session_passthrough(session: Any) -> None:
     original = session.run_turn
 
     def run_turn(user_input, **kwargs):
-        return original(user_input=backend_input(user_input), **kwargs)
+        sent = backend_input(user_input)
+        result = original(user_input=sent, **kwargs)
+        if sent is not user_input:
+            _drop_backend_echo(result, sent)
+        return result
 
     session.run_turn = run_turn
     session._ext_raw_prompt_wrapped = True
+
+
+def _drop_backend_echo(result: Any, sent: Any) -> None:
+    """codex 把 turn/start 的输入作为 userMessage 回显；core 按 Hermes 加工后的输入去重，换成原文后
+    对不上，会在会话里多存一条用户消息。这里按实际发出的原文去掉（同 core：只看第一条用户消息）。"""
+    messages = getattr(result, "projected_messages", None)
+    if not messages:
+        return
+    from agent.transports.codex_app_server_session import _coerce_turn_input_text
+
+    echo = _coerce_turn_input_text(sent).strip()
+    for index, msg in enumerate(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            if str(msg.get("content") or "").strip() == echo:
+                result.projected_messages = messages[:index] + messages[index + 1:]
+            return
 
 
 def backend_input(user_input: Any) -> Any:

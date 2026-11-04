@@ -182,6 +182,7 @@ def test_turn_switches_to_codex_and_back(monkeypatch, tmp_path, _isolated):
     assert session is not None and session.cwd == str(tmp_path.resolve())
     assert codex_cmd.get_mode("sess-cli").codex_session is session
     assert session._ext_raw_prompt_wrapped  # 网关入站消息只把原文发给 codex（raw_prompt）
+    assert session._ext_tool_record_wrapped  # 中间过程按 THIRDAGENT_TOOL_RECORD 决定是否入会话
 
     _turn(agent)  # 后续轮次复用同一线程
     assert agent._codex_session is session

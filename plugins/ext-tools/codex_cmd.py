@@ -52,6 +52,8 @@
     一个会话同一时刻只有一种模式，开启一个即替换另一个。
   - 原文直通：网关给入站消息加的 <source>、群聊历史、引用等不发给后端，只发用户原文
     （附件消息保留附件说明），见 raw_prompt。
+  - 会话记录：默认只把用户输入与最终回复记入 Hermes 会话，中间消息与工具调用不入上下文、不入库；
+    THIRDAGENT_TOOL_RECORD=true 时整轮记录，见 tool_record。
 """
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import raw_prompt  # noqa: E402
+import tool_record  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -532,6 +535,7 @@ def _bind_codex_session(agent: Any, mode: CodexMode) -> None:
             backend.attach(agent, mode, cwd=cwd, previous=candidate)
 
     raw_prompt.install_session_passthrough(agent._codex_session)
+    tool_record.install(agent._codex_session)
     mode.codex_session = agent._codex_session
     mode.owner_agent = weakref.ref(agent)
 
@@ -650,6 +654,8 @@ def _help_text() -> str:
         "memory / delegate_task 等 Hermes 工具在该模式下不可用\n"
         "  • 沙箱与网络由 sandbox 档位决定（不再取决于目录 trust），`on` 与 `status` 会显示 codex 报告的实际沙箱、网络与审批\n"
         "  • 换会话（/new、自动重置）后自动失效；/codex new 则只换 codex 线程、不退出 Codex 模式\n"
+        f"  • Hermes 会话只记录你的消息与 codex 的最终回复，中间消息、工具调用与结果不进上下文也不入会话库；"
+        f"设环境变量 `{tool_record.ENV_VAR}=true` 改为整轮记录\n"
         "  • 与 /claude 互斥：开启 Codex 模式会关闭本会话的 Claude Code 模式，反之亦然\n"
         "  • 消息平台：启用 rbac-guard 时仅 admin 可开启；群聊中只有开启者本人的消息走 Codex"
     )

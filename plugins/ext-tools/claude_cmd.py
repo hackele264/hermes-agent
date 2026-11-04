@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
 import codex_cmd
+import tool_record
 from claude_acp import (
     ACP_COMMAND_ENV,
     BYPASS_MODE,
@@ -176,6 +177,8 @@ def _help_text() -> str:
         "memory / delegate_task 等 Hermes 工具在该模式下不可用\n"
         "  • 运行中可中断（/stop）或追加消息（steer）；/compress 或 /claude compact 压缩上下文（即 Claude Code 的 /compact）\n"
         "  • 换会话（/new、自动重置）后自动失效；/claude new 则只换 Claude 会话、不退出 Claude Code 模式\n"
+        f"  • Hermes 会话只记录你的消息与 Claude Code 的最终回复，中间消息、工具调用与结果不进上下文也不入会话库；"
+        f"设环境变量 `{tool_record.ENV_VAR}=true` 改为整轮记录\n"
         "  • 与 /codex 互斥：开启 Claude Code 模式会关闭本会话的 Codex 模式，反之亦然\n"
         "  • 需要本机已安装并登录 Claude Code（`claude`）以及 Node.js（npx）；"
         f"适配器默认经 npx 运行 `{DEFAULT_ACP_PACKAGE}`，可用 {ACP_COMMAND_ENV} 覆盖启动命令\n"

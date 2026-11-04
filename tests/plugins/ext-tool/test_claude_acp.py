@@ -264,6 +264,26 @@ def test_close_ends_the_adapter_process(tmp_path):
     assert session.acp_session_id == "new-session"  # 供替换会话 resume
 
 
+def test_tool_record_off_keeps_final_reply_and_steer(tmp_path, monkeypatch):
+    import tool_record
+
+    monkeypatch.delenv(tool_record.ENV_VAR, raising=False)
+    session = _session(tmp_path)
+    tool_record.install(session)
+    try:
+        tool_turn = session.run_turn("tool")
+        threading.Timer(0.5, lambda: session.request_steer("go left")).start()
+        steered = session.run_turn("slow")
+    finally:
+        session.close()
+    # 工具调用、工具结果与中间说明都不进 Hermes 会话
+    assert tool_turn.projected_messages == [{"role": "assistant", "content": "All done."}]
+    assert steered.projected_messages == [
+        {"role": "user", "content": "go left"},
+        {"role": "assistant", "content": "Working steered:go left"},
+    ]
+
+
 def test_turn_without_usage_update_reports_no_usage(tmp_path):
     session = ClaudeAcpSession(cwd=str(tmp_path))
     try:

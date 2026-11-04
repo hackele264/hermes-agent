@@ -381,9 +381,15 @@ def real_agent(monkeypatch):
         yield agent
 
 
-def test_real_agent_turn_runs_through_core_codex_path(real_agent, tmp_path):
+@pytest.mark.parametrize("record", [False, True])
+def test_real_agent_turn_runs_through_core_codex_path(real_agent, tmp_path, monkeypatch, record):
+    import tool_record
     from tools.terminal_tool import set_approval_callback
 
+    if record:
+        monkeypatch.setenv(tool_record.ENV_VAR, "true")
+    else:
+        monkeypatch.delenv(tool_record.ENV_VAR, raising=False)
     assert "已开启" in claude_cmd.claude_command(f"on cwd={tmp_path}")
     set_approval_callback(lambda *a, **k: "once")
     try:
@@ -395,7 +401,12 @@ def test_real_agent_turn_runs_through_core_codex_path(real_agent, tmp_path):
     assert result["final_response"] == "All done."
     assert result["completed"] and not result["interrupted"]
     contents = [(m["role"], m.get("content")) for m in result["messages"]]
-    assert contents[-4:] == [("assistant", "Checking."), ("assistant", None), ("tool", "hi"), ("assistant", "All done.")]
+    if record:
+        assert contents[-4:] == [("assistant", "Checking."), ("assistant", None), ("tool", "hi"), ("assistant", "All done.")]
+    else:
+        # 默认：中间说明、工具调用与结果都不进 Hermes 会话，只有用户消息与最终回复
+        assert contents[-2:] == [("user", "tool"), ("assistant", "All done.")]
+        assert not any(m["role"] == "tool" or m.get("tool_calls") for m in result["messages"])
     assert [m["role"] for m in result["messages"]].count("user") == 1  # 用户消息不重复
     assert result["codex_thread_id"] == "new-session"
     assert real_agent.session_total_tokens == 135
