@@ -313,6 +313,7 @@ def _plan_enable(scope: Any, options: dict[str, str]):
     denied = codex_cmd._gateway_enable_denied(scope, ClaudeBackend)
     if denied:
         return denied
+    scope = codex_cmd.ensure_gateway_session(scope)
     ok, version = _claude_code()
     if not ok:
         return f"❌ 无法开启 Claude Code 模式：{version}"

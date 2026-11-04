@@ -378,6 +378,27 @@ def test_gateway_pending_session_binds_on_first_turn(monkeypatch):
     assert not codex_cmd._pending_by_gateway_key
 
 
+def test_gateway_on_precreates_missing_session(monkeypatch):
+    """首条消息 on 时会话未建：插件先建会话，模式直接绑 session_id，不再依赖按 key 挂起。"""
+    import hermes_cli.plugins as plugins_mod
+
+    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    created = []
+    runner = FakeRunner(None)
+    runner.session_store.get_or_create_session = lambda source: (
+        created.append(source) or SimpleNamespace(session_id="sess-new")
+    )
+    _gateway_command(runner, "on")
+    assert len(created) == 1
+    assert codex_cmd.get_mode("sess-new") is not None
+    assert not codex_cmd._pending_by_gateway_key
+
+    agent = FakeAgent("sess-new")
+    agent._gateway_session_key = "agent:main:feishu:group:om_other_key"  # key 漂移也不影响
+    _turn(agent, platform="feishu", sender_id="ou_admin")
+    assert agent.api_mode == "codex_app_server"
+
+
 def test_gateway_requires_rbac_admin(monkeypatch):
     import hermes_cli.plugins as plugins_mod
 

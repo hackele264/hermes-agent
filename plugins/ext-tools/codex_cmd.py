@@ -330,6 +330,30 @@ def _gateway_scope() -> Optional[_Scope]:
     )
 
 
+def ensure_gateway_session(scope: _Scope) -> _Scope:
+    """gateway 上 on 之前会话还没建时，先替调用者把会话建好并返回带 session_id 的 scope。
+
+    飞书等平台的首条消息按 om_* 根消息 id 作 thread_id，话题里的后续消息只有在该 key
+    的会话已存在时才沿用它，否则改用真实 omt_* —— key 一变，按 gateway key 挂起的模式
+    就领不到了。会话先落地，后续消息才会和 on 落在同一个 key 上。"""
+    if scope.surface != "gateway" or scope.session_id:
+        return scope
+    captured = _gateway_dispatch.get()
+    runner = captured[0]() if captured else None
+    store = getattr(runner, "session_store", None)
+    if store is None:
+        return scope
+    try:
+        entry = store.get_or_create_session(captured[1])
+    except Exception:
+        logger.warning("/codex: pre-creating gateway session failed", exc_info=True)
+        return scope
+    sid = getattr(entry, "session_id", None)
+    if not sid:
+        return scope
+    return _Scope(scope.surface, sid, gateway_session_key=scope.gateway_session_key, owner=scope.owner)
+
+
 def _cli_scope() -> Optional[_Scope]:
     try:
         from hermes_cli.plugins import get_plugin_manager
@@ -875,6 +899,7 @@ def _plan_enable(scope: _Scope, options: dict[str, str]):
     denied = _gateway_enable_denied(scope)
     if denied:
         return denied
+    scope = ensure_gateway_session(scope)
     ok, version = _codex_binary()
     if not ok:
         return f"❌ 无法开启 Codex 模式：{version}"
