@@ -101,9 +101,9 @@ def test_tool_turn_streams_projects_and_asks_hermes_approval(tmp_path, fake_acp)
         {"role": "tool", "tool_call_id": "claude_t1", "content": "hi"},
         {"role": "assistant", "content": "All done."},
     ]
-    # 缓存写入并入未命中缓存的输入（codex 记账口径）
+    # 输入桶是本回合最后一个 usage_update.used（当前上下文），totalTokens 是本回合累计
     assert turn.token_usage_last == {
-        "inputTokens": 30, "cachedInputTokens": 100, "outputTokens": 5,
+        "inputTokens": 1234, "cachedInputTokens": 0, "outputTokens": 5,
         "reasoningOutputTokens": 0, "totalTokens": 135,
     }
     assert turn.model_context_window == 200000
@@ -262,6 +262,64 @@ def test_close_ends_the_adapter_process(tmp_path):
     session.close()
     assert session.closed and not session.started and not conn.is_alive()
     assert session.acp_session_id == "new-session"  # 供替换会话 resume
+
+
+def test_turn_without_usage_update_reports_no_usage(tmp_path):
+    session = ClaudeAcpSession(cwd=str(tmp_path))
+    try:
+        turn = session.run_turn("hello")
+        # 回合之间的 usage_update 只更新状态，不算进下一回合
+        session._absorb_update({"sessionUpdate": "usage_update", "used": 999, "size": 200000}, None)
+        assert session.info["context_used"] == 999
+        later = session.run_turn("again")
+    finally:
+        session.close()
+    assert turn.error is None and turn.token_usage_last is None
+    assert later.error is None and later.token_usage_last is None
+
+
+def test_context_is_last_request_not_turn_sum(monkeypatch):
+    """多步工具回合：PromptResponse.usage 累加了每次请求重读的缓存，不能当上下文。"""
+    from types import SimpleNamespace
+
+    import agent.usage_pricing as usage_pricing
+    from agent.codex_runtime import _record_codex_app_server_usage
+    from agent.transports.codex_app_server_session import TurnResult
+
+    monkeypatch.setattr(
+        usage_pricing, "estimate_usage_cost",
+        lambda *a, **k: SimpleNamespace(amount_usd=None, status="unknown", source="none"),
+    )
+    # 30 次请求，每次重读约 22 万缓存上下文
+    turn_sum = {"inputTokens": 3_000, "outputTokens": 40_000, "cachedReadTokens": 6_600_000,
+                "cachedWriteTokens": 60_000, "totalTokens": 6_703_000}
+    turn = TurnResult()
+    turn.token_usage_last = claude_acp._token_usage(turn_sum, 231_500)
+    turn.model_context_window = 1_000_000
+
+    class Compressor:
+        last_prompt_tokens = 0
+        context_length = 0
+
+        def update_from_response(self, usage):
+            self.last_prompt_tokens = usage["prompt_tokens"]
+
+    agent = SimpleNamespace(
+        context_compressor=Compressor(), session_api_calls=0, session_prompt_tokens=0,
+        session_completion_tokens=0, session_total_tokens=0, session_input_tokens=0,
+        session_output_tokens=0, session_cache_read_tokens=0, session_cache_write_tokens=0,
+        session_reasoning_tokens=0, session_estimated_cost_usd=0.0, _session_db=None,
+        session_id="", model="m", provider="custom", base_url="", api_key="",
+    )
+    recorded = _record_codex_app_server_usage(agent, turn)
+
+    assert agent.context_compressor.last_prompt_tokens == 231_500
+    assert recorded["last_prompt_tokens"] == 231_500
+    assert agent.context_compressor.context_length == 1_000_000
+    assert agent.session_total_tokens == 6_703_000  # 本回合累计仍保留在 totalTokens
+    # 压缩后的 0 占位或没有 usage_update：不报用量
+    assert claude_acp._token_usage(turn_sum, 0) is None
+    assert claude_acp._token_usage(turn_sum, None) is None
 
 
 def test_image_parts_become_acp_image_blocks():

@@ -462,27 +462,33 @@ def _is_compaction(update: dict) -> bool:
     )
 
 
-def _token_usage(usage: Any) -> Optional[dict]:
-    """ACP 回合 usage → codex 记账口径（_record_codex_app_server_usage 读取的字段）。"""
-    if not isinstance(usage, dict):
+def _token_usage(usage: Any, context_used: Optional[int]) -> Optional[dict]:
+    """ACP 回合 usage → codex 记账口径（_record_codex_app_server_usage 读取的字段）。
+
+    PromptResponse.usage 是本回合所有模型请求的累加：每次请求都重读一遍缓存上下文，多步工具回合
+    会累加到上下文窗口的几十倍。core 把输入桶当作当前上下文（last_prompt_tokens，网关 hygiene
+    据此决定是否压缩会话），所以输入桶只放本回合最后一个 usage_update.used（最后一次请求的总量，
+    与 codex tokenUsage.last 同口径），totalTokens 仍是本回合累计。拿不到真实上下文（没有
+    usage_update，或压缩后的 0 占位）时不报用量，免得写进一个错的上下文。
+    """
+    if not isinstance(context_used, int) or context_used <= 0:
         return None
+    usage = usage if isinstance(usage, dict) else {}
 
     def _n(key: str) -> int:
         value = usage.get(key)
         return value if isinstance(value, int) and value > 0 else 0
 
-    input_tokens, output_tokens = _n("inputTokens"), _n("outputTokens")
-    cache_read, cache_write = _n("cachedReadTokens"), _n("cachedWriteTokens")
-    total = _n("totalTokens") or input_tokens + output_tokens + cache_read + cache_write
-    if not total:
-        return None
-    # codex 口径没有缓存写入桶：缓存写入计入未命中缓存的输入
+    output_tokens = _n("outputTokens")
+    billed = _n("totalTokens") or (
+        _n("inputTokens") + output_tokens + _n("cachedReadTokens") + _n("cachedWriteTokens")
+    )
     return {
-        "inputTokens": input_tokens + cache_write,
-        "cachedInputTokens": cache_read,
+        "inputTokens": context_used,
+        "cachedInputTokens": 0,
         "outputTokens": output_tokens,
         "reasoningOutputTokens": 0,
-        "totalTokens": total,
+        "totalTokens": billed or context_used + output_tokens,
     }
 
 
@@ -776,6 +782,8 @@ class ClaudeAcpSession:
         self._interrupt_event = threading.Event()
         self._steered: queue.Queue = queue.Queue()
         self._turns = 0
+        # 本回合最后一个 usage_update.used（回合之间的更新不算）
+        self._turn_context_used: Optional[int] = None
         # Claude Code 报告的状态：agent / mode / default_mode / model / model_name / account / steering ...
         self.info: dict[str, Any] = {}
 
@@ -1020,6 +1028,7 @@ class ClaudeAcpSession:
         if callable(begin):
             begin()
         projector = _TurnProjector()
+        self._turn_context_used = None
         pending = conn.start_request("session/prompt", {"sessionId": self._acp_session_id, "prompt": prompt})
         with self._active_lock:
             self._active_turn = result.turn_id
@@ -1105,7 +1114,7 @@ class ClaudeAcpSession:
                 result.error = self._format_error("Claude Code 回合失败", exc)
             result.should_retire = True
             return
-        result.token_usage_last = _token_usage(outcome.get("usage"))
+        result.token_usage_last = _token_usage(outcome.get("usage"), self._turn_context_used)
         stop = outcome.get("stopReason")
         if stop == "cancelled":
             result.interrupted = True
@@ -1188,6 +1197,8 @@ class ClaudeAcpSession:
                     result.model_context_window = size
             if isinstance(update.get("used"), int):
                 self.info["context_used"] = update["used"]
+                if result is not None:
+                    self._turn_context_used = update["used"]
             if result is not None and _is_compaction(update):
                 result.compacted = True
         elif result is not None and _is_compaction(update):
