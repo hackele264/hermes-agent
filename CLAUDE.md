@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Read these first
 
 - **`AGENTS.md`** (repo root, ~1500 lines) — the canonical development guide: contribution rubric, footprint ladder, agent loop, CLI/TUI/desktop architecture, plugins, skills, toolsets, delegation, cron, kanban, policies, pitfalls, testing rules. Treat it as authoritative; everything below is a map and a delta, not a replacement.
-- **`MEMORY.md`** (repo root) — fork-local project rules, including the **Aegis change-intent summary gate**: any task that changes non-test code *outside* `aisoc/`, `workagent/`, `aegis/` must update the per-file `Feature`/`Intent` block in `hermes_change_log_by_aegis.md` (edit the existing pair in place; don't append task logs). That rule intentionally lives only in `MEMORY.md` — read it there rather than assuming the details.
+- **`MEMORY.md`** (repo root) — fork-local project rules, including the **Aegis change-intent summary gate**: any task that changes non-test code *outside* `aisoc/`, `workagent/`, `aegis/`, `plugins/ext-tools/`, `plugins/rbac-guard/` must update the per-file `Feature`/`Intent` block in `hermes_change_log_by_aegis.md` (edit the existing pair in place; don't append task logs). That rule intentionally lives only in `MEMORY.md` — read it there rather than assuming the details.
 - **`apps/desktop/AGENTS.md`** — scoped rules for the Electron desktop app.
 - `CONTRIBUTING.md` for dev setup; `gateway/platforms/ADDING_A_PLATFORM.md` before touching a messaging platform.
 
